@@ -3,18 +3,17 @@ define('TRADING_BOOT', true);
 // ============================================================
 // import.php — POST IBKR HTML report → MySQL
 //
-// Phase 1: writes only ibkr_imports (metadata + NAV + cash).
-// Phase 2 will add trades, positions, summaries.
-//
-// Auth: ?api_key=KEY or X-API-Key header (no session required for now).
+// Auth: ?api_key=KEY or X-API-Key header.
 //
 // Diagnostic mode:
-//   POST ?action=debug_sections  with file => returns parser's section ID list.
+//   POST ?action=debug_sections   → returns parser's section IDs + parsed values
+//   POST ?action=debug_dump       → returns full parsed structures (no DB write)
 // ============================================================
 
 require __DIR__ . '/config.php';
 require __DIR__ . '/lib/Db.php';
 require __DIR__ . '/lib/IbkrParser.php';
+require __DIR__ . '/lib/DateTimeNormalizer.php';
 
 handleCorsPreflight();
 
@@ -51,12 +50,16 @@ try {
     $period      = $parser->getPeriod($origName);
     $nav         = $parser->getNav();
     $cash        = $parser->getCashReport();
+    $trades      = $parser->parseTrades();
+    $positions   = $parser->parseOpenPositions();
+    $summaries   = $parser->parseSymbolSummary();
 } catch (Throwable $e) {
     jsonError('Parser error: ' . $e->getMessage(), 422);
 }
 
-// ---- Diagnostic mode ----
-if (($_GET['action'] ?? '') === 'debug_sections') {
+// ---- Diagnostic modes ----
+$action = $_GET['action'] ?? '';
+if ($action === 'debug_sections') {
     jsonResponse([
         'success'      => true,
         'account_id'   => $accountId,
@@ -64,7 +67,23 @@ if (($_GET['action'] ?? '') === 'debug_sections') {
         'period'       => $period,
         'nav'          => $nav,
         'cash'         => $cash,
+        'counts'       => [
+            'trades'    => count($trades),
+            'positions' => count($positions),
+            'summaries' => count($summaries),
+        ],
         'sections'     => $parser->getSectionIds(),
+    ]);
+}
+if ($action === 'debug_dump') {
+    jsonResponse([
+        'success'   => true,
+        'period'    => $period,
+        'nav'       => $nav,
+        'cash'      => $cash,
+        'trades'    => $trades,
+        'positions' => $positions,
+        'summaries' => $summaries,
     ]);
 }
 
@@ -76,9 +95,13 @@ $safeName = preg_replace('/[^a-zA-Z0-9._-]/', '_', $origName ?: ('upload_' . dat
 $rawPath  = RAW_HTML_DIR . '/' . date('Ymd_His') . '_' . $safeName;
 @file_put_contents($rawPath, $html);
 
-// ---- Insert / update ibkr_imports ----
+// ---- Persist ----
 try {
-    $importId = Db::transaction(function (PDO $pdo) use ($accountId, $accountName, $period, $nav, $cash, $origName, $rawPath) {
+    $importId = Db::transaction(function (PDO $pdo) use (
+        $accountId, $accountName, $period, $nav, $cash,
+        $trades, $positions, $summaries, $origName, $rawPath
+    ) {
+        // ---- ibkr_imports (parent) ----
         $sql = "INSERT INTO ibkr_imports
                   (account_id, account_name, period_start, period_end,
                    nav_start, nav_end, nav_change, mtm_pl, twr,
@@ -108,7 +131,6 @@ try {
                    source_filename = VALUES(source_filename),
                    raw_html_path   = VALUES(raw_html_path),
                    imported_at     = CURRENT_TIMESTAMP";
-
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
             ':account_id'      => $accountId,
@@ -131,7 +153,6 @@ try {
             ':raw_html_path'   => $rawPath,
         ]);
 
-        // Resolve the id (lastInsertId is 0 on UPDATE branch)
         $id = (int)$pdo->lastInsertId();
         if ($id === 0) {
             $q = $pdo->prepare('SELECT id FROM ibkr_imports
@@ -139,6 +160,100 @@ try {
             $q->execute([$accountId, $period['start'], $period['end']]);
             $id = (int)$q->fetchColumn();
         }
+        if ($id === 0) throw new RuntimeException('Failed to resolve import_id');
+
+        // ---- Wipe + re-insert child rows (trades / positions / summary) ----
+        // trade_notes are kept (FK is ON DELETE SET NULL on schema's trade_notes)
+        $pdo->prepare('DELETE FROM ibkr_trades         WHERE import_id = ?')->execute([$id]);
+        $pdo->prepare('DELETE FROM ibkr_open_positions WHERE import_id = ?')->execute([$id]);
+        $pdo->prepare('DELETE FROM ibkr_symbol_summary WHERE import_id = ?')->execute([$id]);
+
+        // ---- ibkr_trades ----
+        if (!empty($trades)) {
+            $sqlT = "INSERT INTO ibkr_trades
+                       (import_id, asset_class, symbol, description,
+                        trade_datetime, raw_datetime, quantity, trade_price, close_price,
+                        proceeds, commission, basis, realized_pl, mtm_pl, trade_code)
+                     VALUES
+                       (:import_id, :asset_class, :symbol, :description,
+                        :trade_datetime, :raw_datetime, :quantity, :trade_price, :close_price,
+                        :proceeds, :commission, :basis, :realized_pl, :mtm_pl, :trade_code)";
+            $stT = $pdo->prepare($sqlT);
+            foreach ($trades as $t) {
+                $stT->execute([
+                    ':import_id'      => $id,
+                    ':asset_class'    => $t['asset_class'],
+                    ':symbol'         => $t['symbol'],
+                    ':description'    => null,
+                    ':trade_datetime' => $t['trade_datetime'],
+                    ':raw_datetime'   => $t['raw_datetime'],
+                    ':quantity'       => $t['quantity'],
+                    ':trade_price'    => $t['trade_price'],
+                    ':close_price'    => $t['close_price'],
+                    ':proceeds'       => $t['proceeds'],
+                    ':commission'     => $t['commission'],
+                    ':basis'          => $t['basis'],
+                    ':realized_pl'    => $t['realized_pl'],
+                    ':mtm_pl'         => $t['mtm_pl'],
+                    ':trade_code'     => $t['trade_code'],
+                ]);
+            }
+        }
+
+        // ---- ibkr_open_positions ----
+        if (!empty($positions)) {
+            $sqlP = "INSERT INTO ibkr_open_positions
+                       (import_id, asset_class, symbol, description,
+                        quantity, avg_cost, close_price, market_value, unrealized_pl)
+                     VALUES
+                       (:import_id, :asset_class, :symbol, :description,
+                        :quantity, :avg_cost, :close_price, :market_value, :unrealized_pl)";
+            $stP = $pdo->prepare($sqlP);
+            foreach ($positions as $p) {
+                $stP->execute([
+                    ':import_id'    => $id,
+                    ':asset_class'  => $p['asset_class'],
+                    ':symbol'       => $p['symbol'],
+                    ':description'  => null,
+                    ':quantity'     => $p['quantity'],
+                    ':avg_cost'     => $p['avg_cost'],
+                    ':close_price'  => $p['close_price'],
+                    ':market_value' => $p['market_value'],
+                    ':unrealized_pl'=> $p['unrealized_pl'],
+                ]);
+            }
+        }
+
+        // ---- ibkr_symbol_summary ----
+        if (!empty($summaries)) {
+            $sqlS = "INSERT INTO ibkr_symbol_summary
+                       (import_id, symbol, description, asset_class,
+                        mtm_pl_position, mtm_pl_transaction,
+                        realized_pl, unrealized_pl, total_pl,
+                        mtd_pl, ytd_pl)
+                     VALUES
+                       (:import_id, :symbol, :description, :asset_class,
+                        :mtm_pl_position, :mtm_pl_transaction,
+                        :realized_pl, :unrealized_pl, :total_pl,
+                        :mtd_pl, :ytd_pl)";
+            $stS = $pdo->prepare($sqlS);
+            foreach ($summaries as $s) {
+                $stS->execute([
+                    ':import_id'         => $id,
+                    ':symbol'            => $s['symbol'],
+                    ':description'       => $s['description'] ?? null,
+                    ':asset_class'       => $s['asset_class'] ?? 'Stock',
+                    ':mtm_pl_position'   => $s['mtm_pl_position'] ?? null,
+                    ':mtm_pl_transaction'=> $s['mtm_pl_transaction'] ?? null,
+                    ':realized_pl'       => $s['realized_pl'] ?? null,
+                    ':unrealized_pl'     => $s['unrealized_pl'] ?? null,
+                    ':total_pl'          => $s['total_pl'] ?? null,
+                    ':mtd_pl'            => $s['mtd_pl'] ?? null,
+                    ':ytd_pl'            => $s['ytd_pl'] ?? null,
+                ]);
+            }
+        }
+
         return $id;
     });
 } catch (Throwable $e) {
@@ -158,8 +273,8 @@ jsonResponse([
     'mtm_pl'       => $nav['mtm_pl'],
     'twr'          => $nav['twr'],
     'cash'         => $cash,
-    'trades'       => 0,        // populated in Phase 2
-    'positions'    => 0,
-    'summaries'    => 0,
-    'phase'        => 1,
+    'trades'       => count($trades),
+    'positions'    => count($positions),
+    'summaries'    => count($summaries),
+    'phase'        => 2,
 ]);

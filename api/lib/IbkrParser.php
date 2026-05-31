@@ -281,6 +281,268 @@ class IbkrParser {
     }
 
     // ----------------------------------------------------------
+    // Trades — every row from the Transactions section
+    //
+    // Columns: Symbol | Date/Time | Quantity | T.Price | C.Price |
+    //          Proceeds | Comm/Fee | Basis | Realized P/L | MTM P/L | Code
+    //
+    // Returns array of associative rows (raw values, NOT yet normalized for DB).
+    // ----------------------------------------------------------
+    public function parseTrades(): array {
+        $body = $this->findBody('Transactions');
+        if (!$body) return [];
+
+        $out = [];
+        $currentAsset = 'Stock';
+
+        $rows = $this->xpath->query('.//tr', $body);
+        foreach ($rows as $row) {
+            $cells = $this->xpath->query('.//td|.//th', $row);
+            if ($cells->length === 0) continue;
+
+            $rowClass = (string)$row->getAttribute('class');
+            $firstCell = $cells->item(0);
+            $firstClass = (string)$firstCell->getAttribute('class');
+
+            // Asset class header e.g. "Stocks", "Equity and Index Options"
+            if (strpos($firstClass, 'header-asset') !== false) {
+                $currentAsset = self::mapAssetLabel(trim($firstCell->textContent));
+                continue;
+            }
+            // Currency header — skip
+            if (strpos($firstClass, 'header-currency') !== false) continue;
+            // Subtotal "Total SYMBOL" rows — skip
+            if (strpos($rowClass, 'subtotal') !== false) continue;
+            // Header rows
+            if ($row->parentNode && strtolower($row->parentNode->nodeName) === 'thead') continue;
+
+            // Trade rows have ~11 cells. Be defensive.
+            if ($cells->length < 11) continue;
+
+            $symbol      = trim($cells->item(0)->textContent);
+            $datetime    = trim($cells->item(1)->textContent);
+            $qty         = self::parseMoney($cells->item(2)->textContent);
+            $tprice      = self::parseMoney($cells->item(3)->textContent);
+            $cprice      = self::parseMoney($cells->item(4)->textContent);
+            $proceeds    = self::parseMoney($cells->item(5)->textContent);
+            $comm        = self::parseMoney($cells->item(6)->textContent);
+            $basis       = self::parseMoney($cells->item(7)->textContent);
+            $realized    = self::parseMoney($cells->item(8)->textContent);
+            $mtm         = self::parseMoney($cells->item(9)->textContent);
+            $code        = trim($cells->item(10)->textContent);
+
+            if ($symbol === '' || $qty === null || $datetime === '') continue;
+
+            // Override asset class if symbol pattern looks like an option
+            $asset = $currentAsset;
+            if (self::looksLikeOption($symbol)) $asset = 'Option';
+
+            $out[] = [
+                'asset_class'    => $asset,
+                'symbol'         => $symbol,
+                'raw_datetime'   => $datetime,
+                'trade_datetime' => DateTimeNormalizer::ibkrToUtc($datetime),
+                'quantity'       => $qty,
+                'trade_price'    => $tprice,
+                'close_price'    => $cprice,
+                'proceeds'       => $proceeds,
+                'commission'     => $comm,
+                'basis'          => $basis,
+                'realized_pl'    => $realized,
+                'mtm_pl'         => $mtm,
+                'trade_code'     => $code,
+            ];
+        }
+        return $out;
+    }
+
+    // ----------------------------------------------------------
+    // Open Positions
+    //
+    // Columns: Symbol | Quantity | Mult | Cost Price | Cost Basis |
+    //          Close Price | Value | Unrealized P/L | Code
+    // ----------------------------------------------------------
+    public function parseOpenPositions(): array {
+        $body = $this->findBody('OpenPositions');
+        if (!$body) return [];
+
+        $out = [];
+        $currentAsset = 'Stock';
+
+        $rows = $this->xpath->query('.//tr', $body);
+        foreach ($rows as $row) {
+            $cells = $this->xpath->query('.//td|.//th', $row);
+            if ($cells->length === 0) continue;
+
+            $rowClass  = (string)$row->getAttribute('class');
+            $firstCell = $cells->item(0);
+            $firstClass = (string)$firstCell->getAttribute('class');
+
+            if (strpos($firstClass, 'header-asset') !== false) {
+                $currentAsset = self::mapAssetLabel(trim($firstCell->textContent));
+                continue;
+            }
+            if (strpos($firstClass, 'header-currency') !== false) continue;
+            if (strpos($rowClass, 'subtotal') !== false) continue;
+            if ($row->parentNode && strtolower($row->parentNode->nodeName) === 'thead') continue;
+
+            if ($cells->length < 8) continue;
+
+            $symbol      = trim($cells->item(0)->textContent);
+            $qty         = self::parseMoney($cells->item(1)->textContent);
+            // Skip "Mult" col index 2
+            $costPrice   = self::parseMoney($cells->item(3)->textContent);
+            // costBasis at index 4
+            $closePrice  = self::parseMoney($cells->item(5)->textContent);
+            $marketValue = self::parseMoney($cells->item(6)->textContent);
+            $unrealized  = self::parseMoney($cells->item(7)->textContent);
+
+            if ($symbol === '' || $qty === null) continue;
+
+            $asset = $currentAsset;
+            if (self::looksLikeOption($symbol)) $asset = 'Option';
+
+            $out[] = [
+                'asset_class'   => $asset,
+                'symbol'        => $symbol,
+                'quantity'      => $qty,
+                'avg_cost'      => $costPrice,
+                'close_price'   => $closePrice,
+                'market_value'  => $marketValue,
+                'unrealized_pl' => $unrealized,
+            ];
+        }
+        return $out;
+    }
+
+    // ----------------------------------------------------------
+    // Symbol Summary
+    //
+    // Merge data from three IBKR tables, keyed by symbol:
+    //   MtmPerfSumByUnderlying  → mtm_pl_position, mtm_pl_transaction
+    //   FIFOPerfSumByUnderlying → realized_pl, unrealized_pl, total_pl
+    //   MTDYTDPerfSum           → mtd_pl, ytd_pl (Mark-to-Market columns)
+    // ----------------------------------------------------------
+    public function parseSymbolSummary(): array {
+        $merged = [];
+
+        // ----- MTM table -----
+        // Cols (11): Symbol | Qty Prior | Qty Current | Price Prior | Price Current |
+        //            MTM Position | MTM Transaction | MTM Commissions | MTM Other | MTM Total | Code
+        $this->iterRows('MtmPerfSumByUnderlying', function($cells, $asset) use (&$merged) {
+            if ($cells->length < 11) return;
+            $sym = trim($cells->item(0)->textContent);
+            if ($sym === '') return;
+            $merged[$sym] = array_merge($merged[$sym] ?? [], [
+                'asset_class'        => $asset,
+                'symbol'             => $sym,
+                'mtm_pl_position'    => self::parseMoney($cells->item(5)->textContent),
+                'mtm_pl_transaction' => self::parseMoney($cells->item(6)->textContent),
+                // Take "Total" MTM col (index 9) into total_pl if FIFO is missing
+                '_mtm_total'         => self::parseMoney($cells->item(9)->textContent),
+            ]);
+        });
+
+        // ----- FIFO table -----
+        // Cols (14): Symbol | CostAdj | (Realized) ST P/ST L/LT P/LT L/Total |
+        //                            (Unrealized) ST P/ST L/LT P/LT L/Total | Total | Code
+        $this->iterRows('FIFOPerfSumByUnderlying', function($cells, $asset) use (&$merged) {
+            if ($cells->length < 14) return;
+            $sym = trim($cells->item(0)->textContent);
+            if ($sym === '') return;
+            $realized   = self::parseMoney($cells->item(6)->textContent);   // Realized Total
+            $unrealized = self::parseMoney($cells->item(11)->textContent);  // Unrealized Total
+            $total      = self::parseMoney($cells->item(12)->textContent);  // grand Total
+            $merged[$sym] = array_merge($merged[$sym] ?? [], [
+                'asset_class'   => $merged[$sym]['asset_class'] ?? $asset,
+                'symbol'        => $sym,
+                'realized_pl'   => $realized,
+                'unrealized_pl' => $unrealized,
+                'total_pl'      => $total,
+            ]);
+        });
+
+        // ----- MTD/YTD table -----
+        // Cols (8): Symbol | Description | MTM MTD | MTM YTD | RST MTD | RST YTD | RLT MTD | RLT YTD
+        $this->iterRows('MTDYTDPerfSum', function($cells, $asset) use (&$merged) {
+            if ($cells->length < 4) return;
+            $sym  = trim($cells->item(0)->textContent);
+            if ($sym === '') return;
+            $desc = trim($cells->item(1)->textContent);
+            $mtd  = self::parseMoney($cells->item(2)->textContent);
+            $ytd  = self::parseMoney($cells->item(3)->textContent);
+            $merged[$sym] = array_merge($merged[$sym] ?? [], [
+                'asset_class' => $merged[$sym]['asset_class'] ?? $asset,
+                'symbol'      => $sym,
+                'description' => $desc,
+                'mtd_pl'      => $mtd,
+                'ytd_pl'      => $ytd,
+            ]);
+        });
+
+        // Final pass: if total_pl is missing but _mtm_total exists, use it.
+        foreach ($merged as $sym => &$row) {
+            if (empty($row['total_pl']) && isset($row['_mtm_total'])) {
+                $row['total_pl'] = $row['_mtm_total'];
+            }
+            unset($row['_mtm_total']);
+        }
+        unset($row);
+
+        return array_values($merged);
+    }
+
+    /**
+     * Helper: iterate data rows of a section, calling $cb($cells, $currentAsset) for each.
+     * Skips header / subtotal / currency rows.
+     */
+    private function iterRows(string $sectionName, callable $cb): void {
+        $body = $this->findBody($sectionName);
+        if (!$body) return;
+        $currentAsset = 'Stock';
+        $rows = $this->xpath->query('.//tr', $body);
+        foreach ($rows as $row) {
+            $cells = $this->xpath->query('.//td|.//th', $row);
+            if ($cells->length === 0) continue;
+
+            $rowClass  = (string)$row->getAttribute('class');
+            $firstCell = $cells->item(0);
+            $firstClass = (string)$firstCell->getAttribute('class');
+
+            if (strpos($firstClass, 'header-asset') !== false) {
+                $currentAsset = self::mapAssetLabel(trim($firstCell->textContent));
+                continue;
+            }
+            if (strpos($firstClass, 'header-currency') !== false) continue;
+            if (strpos($rowClass, 'subtotal') !== false) continue;
+            if ($row->parentNode && strtolower($row->parentNode->nodeName) === 'thead') continue;
+
+            $cb($cells, $currentAsset);
+        }
+    }
+
+    // ----------------------------------------------------------
+    // Helpers for asset classification
+    // ----------------------------------------------------------
+
+    private static function mapAssetLabel(string $label): string {
+        $l = strtolower($label);
+        if (strpos($l, 'option') !== false) return 'Option';
+        if (strpos($l, 'forex') !== false)  return 'Forex';
+        if (strpos($l, 'etf') !== false)    return 'ETF';
+        if (strpos($l, 'stock') !== false || strpos($l, 'equit') !== false) return 'Stock';
+        return 'Other';
+    }
+
+    /**
+     * Crude options ticker detection.
+     * Examples: "TSLA 01JUN26 440 C", "AAPL  29MAY26 200 P"
+     */
+    private static function looksLikeOption(string $symbol): bool {
+        return (bool)preg_match('/\s+\d{1,2}[A-Z]{3}\d{2}\s+\d+(\.\d+)?\s+[CP]/', $symbol);
+    }
+
+    // ----------------------------------------------------------
     // Diagnostic
     // ----------------------------------------------------------
     public function getSectionIds(): array {
