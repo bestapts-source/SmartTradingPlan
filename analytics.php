@@ -15,6 +15,37 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   /* Analytics-specific tweaks layered on top of style.css */
+
+  /* Wider container — KPI cards need breathing room */
+  body[data-page="analytics"] main{max-width:1280px;}
+
+  /* Force a clean grid: 4 columns of 2 rows on desktop, 2 on tablet, 1 on mobile */
+  .kpi-grid{
+    display:grid; gap:10px;
+    grid-template-columns:repeat(4, minmax(0,1fr));
+  }
+  @media(max-width:900px){.kpi-grid{grid-template-columns:repeat(2,1fr);}}
+  @media(max-width:520px){.kpi-grid{grid-template-columns:1fr;}}
+  .kpi{
+    background:var(--bg3); border:.5px solid var(--border); border-radius:10px;
+    padding:0.9rem 1.1rem;
+  }
+  .kpi-label{font-size:11px; color:var(--muted);}
+  .kpi-val{
+    font-family:'DM Mono',monospace; font-size:20px; font-weight:500;
+    margin-top:4px; color:var(--text);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .kpi-val.green{color:var(--green);}
+  .kpi-val.red  {color:var(--red);}
+  .kpi-sub{
+    font-family:'DM Mono',monospace; font-size:11px; color:var(--muted); margin-top:3px;
+  }
+  .kpi-split{display:flex; gap:14px; margin-top:4px;}
+  .kpi-split > div{flex:1;}
+  .kpi-split-label{font-size:10px; color:var(--muted);}
+  .kpi-split-val  {font-family:'DM Mono',monospace; font-size:16px; font-weight:500;}
+
   .toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:1rem 0 1.5rem;}
   .toolbar select{
     background:var(--bg2); color:var(--text);
@@ -84,7 +115,7 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
   </div>
 
   <!-- BLOCK 1: KPIs -->
-  <div class="metrics" id="kpis"></div>
+  <div class="kpi-grid" id="kpis"></div>
 
   <!-- BLOCK 2: Equity Curve -->
   <div class="sec-label">Equity curve (закрытый P&L по дням)</div>
@@ -109,7 +140,7 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
 
 </main>
 
-<script src="nav.js"></script>
+<script src="nav.js?v=<?= filemtime(__DIR__ . '/nav.js') ?>"></script>
 <script>
 // ============================================================
 // analytics dashboard front-end
@@ -122,6 +153,9 @@ let equityChart = null;
 const fmt = {
   money: v => v === null || v === undefined ? '—' :
     (v >= 0 ? '+' : '') + Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}),
+  // Full money without leading sign (used for NAV totals — "$107,022.51")
+  moneyFull: v => v === null || v === undefined ? '—' :
+    Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}),
   moneyShort: v => v === null || v === undefined ? '—' :
     Number(v).toLocaleString('en-US',{maximumFractionDigits:0}),
   pct: v => v === null || v === undefined ? '—' : Number(v).toFixed(2) + '%',
@@ -164,21 +198,53 @@ async function api(action, params = {}) {
 function renderKpis(data) {
   const imp   = data.import;
   const stats = data.stats;
-  const m = [
-    { label: 'NAV начало',  val: '$' + fmt.moneyShort(imp.nav_start) },
-    { label: 'NAV конец',   val: '$' + fmt.moneyShort(imp.nav_end) },
-    { label: 'Изменение',   val: fmt.money(imp.nav_change), cls: imp.nav_change >= 0 ? 'green' : 'red' },
-    { label: 'TWR',         val: fmt.pct(imp.twr),          cls: imp.twr >= 0 ? 'green' : 'red' },
-    { label: 'Realized',    val: fmt.money(stats.total_realized), cls: stats.total_realized >= 0 ? 'green' : 'red' },
-    { label: 'Win rate',    val: stats.win_rate === null ? '—' : fmt.pct(stats.win_rate) },
-    { label: 'Сделок (закр.)', val: `${stats.winners}/${stats.losers}` },
-    { label: 'Лучшая',      val: fmt.money(stats.best_trade),  cls: 'green' },
-    { label: 'Худшая',      val: fmt.money(stats.worst_trade), cls: 'red' },
+  const nv = n => Number(n);
+  // KPI plan: row 1 = NAV start, NAV end, Δ, TWR
+  //          row 2 = Realized, Win rate, Сделок, Best/Worst
+  const cards = [
+    {
+      label: 'NAV начало',
+      html: `<div class="kpi-val">$${fmt.moneyFull(imp.nav_start)}</div>`,
+    },
+    {
+      label: 'NAV конец',
+      html: `<div class="kpi-val">$${fmt.moneyFull(imp.nav_end)}</div>`,
+    },
+    {
+      label: 'Изменение',
+      html: `<div class="kpi-val ${nv(imp.nav_change) >= 0 ? 'green' : 'red'}">${fmt.money(imp.nav_change)}</div>`,
+    },
+    {
+      label: 'TWR',
+      html: `<div class="kpi-val ${nv(imp.twr) >= 0 ? 'green' : 'red'}">${fmt.pct(imp.twr)}</div>`,
+    },
+    {
+      label: 'Realized P&L',
+      html: `<div class="kpi-val ${nv(stats.total_realized) >= 0 ? 'green' : 'red'}">${fmt.money(stats.total_realized)}</div>
+             <div class="kpi-sub">${stats.closing_trades} закр., ср. ${stats.avg_pl===null?'—':fmt.money(stats.avg_pl)}</div>`,
+    },
+    {
+      label: 'Win rate',
+      html: `<div class="kpi-val ${nv(stats.win_rate) >= 50 ? 'green' : 'red'}">${stats.win_rate===null?'—':fmt.pct(stats.win_rate)}</div>
+             <div class="kpi-sub">${stats.winners} побед · ${stats.losers} убытков</div>`,
+    },
+    {
+      label: 'Всего сделок',
+      html: `<div class="kpi-val">${stats.total_trades}</div>
+             <div class="kpi-sub">из них ${stats.closing_trades} закрывающих</div>`,
+    },
+    {
+      label: 'Best / Worst',
+      html: `<div class="kpi-split">
+               <div><div class="kpi-split-label">Лучшая</div><div class="kpi-split-val green">${fmt.money(stats.best_trade)}</div></div>
+               <div><div class="kpi-split-label">Худшая</div><div class="kpi-split-val red">${fmt.money(stats.worst_trade)}</div></div>
+             </div>`,
+    },
   ];
-  document.getElementById('kpis').innerHTML = m.map(x => `
-    <div class="metric">
-      <div class="metric-label">${x.label}</div>
-      <div class="metric-val ${x.cls || ''}">${x.val}</div>
+  document.getElementById('kpis').innerHTML = cards.map(c => `
+    <div class="kpi">
+      <div class="kpi-label">${c.label}</div>
+      ${c.html}
     </div>
   `).join('');
 
