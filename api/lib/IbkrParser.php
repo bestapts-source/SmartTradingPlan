@@ -3,27 +3,34 @@ if (!defined('TRADING_BOOT')) { http_response_code(403); exit('Forbidden'); }
 // ============================================================
 // IbkrParser — parses Interactive Brokers Activity Statement HTML
 //
+// Real-world IBKR HTML structure (verified May 2026):
+//   Section headers:   <a id="secXxxYy[_]U<accountId>Heading">
+//   Table bodies:      <div id="tblXxxYy[_]U<accountId>Body">
+//
+//   Some sections use `_U` (underscore), others just `U`:
+//     tblNAV_U5879065Body
+//     tblTransactions_U5879065Body
+//     tblContractInfoU5879065Body            (NO underscore)
+//     tblFIFOPerfSumByUnderlyingU5879065Body (NO underscore)
+//
 // Phase 1 scope: account metadata + period + NAV + cash report.
-// Trades / positions / summaries are added in Phase 2.
+// Phase 2 adds trades / positions / symbol summary.
 // ============================================================
 
 class IbkrParser {
     private DOMDocument $dom;
     private DOMXPath $xpath;
     private ?string $accountId = null;
+    private ?string $rawHtml   = null;
 
     public function __construct(string $html) {
-        // IBKR statements are usually UTF-8 but sometimes contain Win-1252 chars.
-        // Normalize to UTF-8 to be safe.
         if (!preg_match('//u', $html)) {
             $html = mb_convert_encoding($html, 'UTF-8', 'Windows-1252');
         }
+        $this->rawHtml = $html;
 
-        // Suppress libxml HTML5 warnings
         libxml_use_internal_errors(true);
-
         $this->dom = new DOMDocument();
-        // Prefix with explicit meta to keep DOMDocument from re-encoding
         $this->dom->loadHTML(
             '<?xml encoding="UTF-8">' . $html,
             LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
@@ -40,28 +47,30 @@ class IbkrParser {
     public function getAccountId(): string {
         if ($this->accountId !== null) return $this->accountId;
 
-        // Strategy 1: look in Account Information section
-        $section = $this->findSectionByPrefix('secAccountInformation');
-        if ($section) {
-            $cells = $this->xpath->query('.//td', $section);
-            foreach ($cells as $i => $cell) {
-                $text = trim($cell->textContent);
-                if ($text === 'Account' && $i + 1 < $cells->length) {
-                    $candidate = trim($cells->item($i + 1)->textContent);
-                    if (preg_match('/^[UF]\d+$/', $candidate)) {
-                        $this->accountId = $candidate;
-                        return $this->accountId;
-                    }
-                }
+        // Strategy 1: any tbl/sec ID — extract trailing account part
+        // matches both "tblNAV_U5879065Body" and "tblContractInfoU5879065Body"
+        $nodes = $this->xpath->query('//*[@id]');
+        foreach ($nodes as $node) {
+            $id = $node->getAttribute('id');
+            if (preg_match('/(?:^sec|^tbl).+?_?([UF]\d{4,})(?:Heading|Body)$/', $id, $m)) {
+                $this->accountId = $m[1];
+                return $this->accountId;
             }
         }
 
-        // Strategy 2: scan all section IDs for the suffix
-        $sections = $this->xpath->query('//*[@id]');
-        foreach ($sections as $node) {
-            $id = $node->getAttribute('id');
-            if (preg_match('/^sec[A-Z][a-zA-Z]+([UF]\d+)$/', $id, $m)) {
-                $this->accountId = $m[1];
+        // Strategy 2: title "U5879065 Activity Statement ..."
+        $title = $this->xpath->query('//title')->item(0);
+        if ($title && preg_match('/\b([UF]\d{4,})\b/', $title->textContent, $m)) {
+            $this->accountId = $m[1];
+            return $this->accountId;
+        }
+
+        // Strategy 3: Account Information body
+        $body = $this->findBody('AccountInformation');
+        if ($body) {
+            $val = $this->labelLookup($body, 'Account');
+            if ($val && preg_match('/^[UF]\d+$/', $val)) {
+                $this->accountId = $val;
                 return $this->accountId;
             }
         }
@@ -70,37 +79,36 @@ class IbkrParser {
     }
 
     public function getAccountName(): ?string {
-        $section = $this->findSectionByPrefix('secAccountInformation');
-        if (!$section) return null;
-
-        $cells = $this->xpath->query('.//td', $section);
-        foreach ($cells as $i => $cell) {
-            if (trim($cell->textContent) === 'Name' && $i + 1 < $cells->length) {
-                return trim($cells->item($i + 1)->textContent);
-            }
-        }
-        return null;
+        $body = $this->findBody('AccountInformation');
+        if (!$body) return null;
+        return $this->labelLookup($body, 'Name');
     }
 
     /**
      * Returns ['start' => 'YYYY-MM-DD', 'end' => 'YYYY-MM-DD']
-     * Falls back to parsing the filename if section is missing.
      */
     public function getPeriod(?string $sourceFilename = null): array {
-        // From section
-        $section = $this->findSectionByPrefix('secAccountInformation');
-        if ($section) {
-            $cells = $this->xpath->query('.//td', $section);
-            foreach ($cells as $i => $cell) {
-                if (trim($cell->textContent) === 'Period' && $i + 1 < $cells->length) {
-                    $raw = trim($cells->item($i + 1)->textContent);
-                    $parsed = self::parsePeriodString($raw);
-                    if ($parsed) return $parsed;
-                }
+        // Strategy 1: <title>U5879065 Activity Statement May 25, 2026 - May 29, 2026</title>
+        $title = $this->xpath->query('//title')->item(0);
+        if ($title) {
+            $text = trim($title->textContent);
+            if (preg_match('/Activity Statement\s+(.+?)\s*$/i', $text, $m)) {
+                $parsed = self::parsePeriodString($m[1]);
+                if ($parsed) return $parsed;
             }
         }
 
-        // Fallback: filename
+        // Strategy 2: Account Information's Period field (if present)
+        $body = $this->findBody('AccountInformation');
+        if ($body) {
+            $val = $this->labelLookup($body, 'Period');
+            if ($val) {
+                $parsed = self::parsePeriodString($val);
+                if ($parsed) return $parsed;
+            }
+        }
+
+        // Strategy 3: filename — U5879065_20260525_20260529.htm or U5879065_20260501.htm
         if ($sourceFilename) {
             $parsed = self::parsePeriodFromFilename($sourceFilename);
             if ($parsed) return $parsed;
@@ -110,41 +118,33 @@ class IbkrParser {
     }
 
     public static function parsePeriodFromFilename(string $filename): ?array {
-        // e.g. U5879065_20260525_20260529.htm
         if (preg_match('/_(\d{8})_(\d{8})\.html?$/i', $filename, $m)) {
-            return [
-                'start' => self::ymdToDate($m[1]),
-                'end'   => self::ymdToDate($m[2]),
-            ];
+            return ['start' => self::ymdToDate($m[1]), 'end' => self::ymdToDate($m[2])];
+        }
+        // Single date variant: U5879065_20260501.htm — treat as single day
+        if (preg_match('/_(\d{8})\.html?$/i', $filename, $m)) {
+            $d = self::ymdToDate($m[1]);
+            return ['start' => $d, 'end' => $d];
         }
         return null;
     }
 
     public static function parsePeriodString(string $raw): ?array {
-        // Examples:
-        //  "May 25, 2026 - May 29, 2026"
-        //  "May 25 - May 29, 2026"
-        //  "May 25, 2026"
         $raw = preg_replace('/\s+/', ' ', trim($raw));
 
-        if (preg_match('/^(.+?)\s*-\s*(.+)$/', $raw, $m)) {
+        if (preg_match('/^(.+?)\s*[-–—]\s*(.+)$/u', $raw, $m)) {
             $left  = trim($m[1]);
             $right = trim($m[2]);
-            // If left has no year, borrow from right
             if (!preg_match('/\d{4}/', $left) && preg_match('/(\d{4})/', $right, $ym)) {
                 $left .= ', ' . $ym[1];
             }
             $start = self::tryParseDate($left);
             $end   = self::tryParseDate($right);
-            if ($start && $end) {
-                return ['start' => $start, 'end' => $end];
-            }
+            if ($start && $end) return ['start' => $start, 'end' => $end];
         }
 
         $single = self::tryParseDate($raw);
-        if ($single) {
-            return ['start' => $single, 'end' => $single];
-        }
+        if ($single) return ['start' => $single, 'end' => $single];
         return null;
     }
 
@@ -159,11 +159,16 @@ class IbkrParser {
     }
 
     // ----------------------------------------------------------
-    // NAV — Net Asset Value
-    // Returns array: nav_start, nav_end, nav_change, mtm_pl, twr
+    // NAV
+    //
+    // The NAV table has columns:
+    //   [label][period-start Total][end Long][end Short][end Total][Change]
+    // We look for the row whose label = "Total" AND class includes "subtotal".
+    //
+    // Then a separate TWR row has class="twr" — last cell is the percent.
     // ----------------------------------------------------------
     public function getNav(): array {
-        $section = $this->findSectionByPrefix('secNAV');
+        $body = $this->findBody('NAV');
         $result = [
             'nav_start'  => null,
             'nav_end'    => null,
@@ -171,34 +176,40 @@ class IbkrParser {
             'mtm_pl'     => null,
             'twr'        => null,
         ];
-        if (!$section) return $result;
+        if (!$body) return $result;
 
-        // The NAV table typically has rows: Starting Value | Ending Value | Change | Mark-to-Market | TWR
-        // We scan every row, looking at label cell + last numeric cell
-        $rows = $this->xpath->query('.//tr', $section);
+        $rows = $this->xpath->query('.//tr', $body);
         foreach ($rows as $row) {
-            $cells = $this->xpath->query('.//td|.//th', $row);
-            if ($cells->length < 2) continue;
+            $cells = $this->xpath->query('.//th|.//td', $row);
+            if ($cells->length === 0) continue;
 
-            $label = strtolower(trim($cells->item(0)->textContent));
-            // Last cell typically holds the total
-            $lastVal = self::parseMoney($cells->item($cells->length - 1)->textContent);
+            $rowClass = (string)$row->getAttribute('class');
+            $label    = trim(preg_replace('/\s+/', ' ', $cells->item(0)->textContent));
 
-            if ($this->matchesAny($label, ['starting value', 'beginning value', 'opening value', 'beginning of period'])) {
-                $result['nav_start'] = $lastVal;
-            } elseif ($this->matchesAny($label, ['ending value', 'closing value', 'end of period'])) {
-                $result['nav_end'] = $lastVal;
-            } elseif ($this->matchesAny($label, ['change', 'net change'])) {
-                $result['nav_change'] = $lastVal;
-            } elseif ($this->matchesAny($label, ['mark-to-market', 'mark to market', 'mtm'])) {
-                $result['mtm_pl'] = $lastVal;
-            } elseif ($this->matchesAny($label, ['time weighted return', 'twr', 'time-weighted'])) {
-                // TWR may include trailing '%'
-                $result['twr'] = self::parsePercent($cells->item($cells->length - 1)->textContent);
+            // The grand-total row: "Total" with class="subtotal"
+            if (strpos($rowClass, 'subtotal') !== false && stripos($label, 'Total') !== false) {
+                // Expect 6 cells: label, col1 (period-start Total), Long, Short, end Total, Change
+                if ($cells->length >= 6) {
+                    $result['nav_start']  = self::parseMoney($cells->item(1)->textContent);
+                    $result['nav_end']    = self::parseMoney($cells->item(4)->textContent);
+                    $result['nav_change'] = self::parseMoney($cells->item(5)->textContent);
+                }
+            }
+
+            // TWR row
+            if (stripos($label, 'Time Weighted') !== false || stripos($label, 'TWR') !== false
+                || strpos($rowClass, 'twr') !== false) {
+                $last = $cells->item($cells->length - 1);
+                $result['twr'] = self::parsePercent($last->textContent);
+            }
+
+            // Mark-to-Market row (sometimes present in NAV table)
+            if (stripos($label, 'Mark-to-Market') !== false || stripos($label, 'Mark to Market') !== false) {
+                $last = $cells->item($cells->length - 1);
+                $result['mtm_pl'] = self::parseMoney($last->textContent);
             }
         }
 
-        // Derive change if missing
         if ($result['nav_change'] === null && $result['nav_start'] !== null && $result['nav_end'] !== null) {
             $result['nav_change'] = round($result['nav_end'] - $result['nav_start'], 2);
         }
@@ -207,10 +218,13 @@ class IbkrParser {
     }
 
     // ----------------------------------------------------------
-    // Cash report
+    // Cash Report
+    //
+    // Each row: [Label] [Total] [Securities] [Futures] [Month to Date] [Year to Date]
+    // We take the "Total" column (index 1).
     // ----------------------------------------------------------
     public function getCashReport(): array {
-        $section = $this->findSectionByPrefix('secCashReport');
+        $body = $this->findBody('CashReport');
         $result = [
             'commissions'     => null,
             'trades_sales'    => null,
@@ -220,44 +234,61 @@ class IbkrParser {
             'deposits'        => null,
             'withdrawals'    => null,
         ];
-        if (!$section) return $result;
+        if (!$body) return $result;
 
-        $rows = $this->xpath->query('.//tr', $section);
+        $accountTransfers = null;
+
+        $rows = $this->xpath->query('.//tr', $body);
         foreach ($rows as $row) {
             $cells = $this->xpath->query('.//td|.//th', $row);
             if ($cells->length < 2) continue;
 
-            $label = strtolower(trim($cells->item(0)->textContent));
-            $val   = self::parseMoney($cells->item($cells->length - 1)->textContent);
+            $label = strtolower(trim(preg_replace('/\s+/', ' ', $cells->item(0)->textContent)));
+            $total = self::parseMoney($cells->item(1)->textContent);
 
-            if ($this->matchesAny($label, ['commissions'])) {
-                $result['commissions'] = $val;
-            } elseif ($this->matchesAny($label, ['sales', 'trades (sales)'])) {
-                $result['trades_sales'] = $val;
-            } elseif ($this->matchesAny($label, ['purchase', 'trades (purchase)', 'purchases'])) {
-                $result['trades_purchase'] = $val;
-            } elseif ($this->matchesAny($label, ['dividends'])) {
-                $result['dividends'] = $val;
-            } elseif ($this->matchesAny($label, ['interest', 'broker interest'])) {
-                $result['interest'] = $val;
-            } elseif ($this->matchesAny($label, ['deposits'])) {
-                $result['deposits'] = $val;
-            } elseif ($this->matchesAny($label, ['withdrawals'])) {
-                $result['withdrawals'] = $val;
+            if ($total === null) continue;
+
+            // Match common label phrases
+            if ($this->labelHas($label, ['commission'])) {
+                $result['commissions'] = $total;
+            } elseif ($this->labelHas($label, ['sales', 'trades (sales)'])) {
+                $result['trades_sales'] = $total;
+            } elseif ($this->labelHas($label, ['purchase', 'trades (purchase)'])) {
+                $result['trades_purchase'] = $total;
+            } elseif ($this->labelHas($label, ['dividend'])) {
+                $result['dividends'] = $total;
+            } elseif ($this->labelHas($label, ['interest', 'broker interest'])) {
+                $result['interest'] = $total;
+            } elseif ($this->labelHas($label, ['deposit'])) {
+                $result['deposits'] = $total;
+            } elseif ($this->labelHas($label, ['withdrawal'])) {
+                $result['withdrawals'] = $total;
+            } elseif ($this->labelHas($label, ['account transfer'])) {
+                $accountTransfers = $total;
             }
         }
+
+        // Account transfers → deposits (if positive) or withdrawals (if negative).
+        if ($accountTransfers !== null && abs($accountTransfers) > 0.001) {
+            if ($accountTransfers > 0) {
+                $result['deposits']    = ($result['deposits']    ?? 0) + $accountTransfers;
+            } else {
+                $result['withdrawals'] = ($result['withdrawals'] ?? 0) + $accountTransfers;
+            }
+        }
+
         return $result;
     }
 
     // ----------------------------------------------------------
-    // Diagnostic: list all section IDs in the document
+    // Diagnostic
     // ----------------------------------------------------------
     public function getSectionIds(): array {
         $ids = [];
         $nodes = $this->xpath->query('//*[@id]');
         foreach ($nodes as $n) {
             $id = $n->getAttribute('id');
-            if (str_starts_with($id, 'sec')) {
+            if (preg_match('/^(sec|tbl)/', $id)) {
                 $ids[] = $id;
             }
         }
@@ -269,31 +300,55 @@ class IbkrParser {
     // ----------------------------------------------------------
 
     /**
-     * Find a section element whose ID starts with the prefix
-     * (handles dynamic suffix like "secNAVU5879065")
+     * Find the body div for a logical section name like "NAV", "Transactions",
+     * "AccountInformation", "CashReport", "OpenPositions", "ContractInfo",
+     * "MtmPerfSumByUnderlying", "FIFOPerfSumByUnderlying", "MTDYTDPerfSum".
+     *
+     * Tries: tbl<Name>_U<accountId>Body, then tbl<Name>U<accountId>Body
+     * (some sections use underscore, others don't).
      */
-    private function findSectionByPrefix(string $prefix): ?DOMElement {
-        // Try exact prefix + account ID first (most specific)
-        $byId = $this->dom->getElementById($prefix);
-        if ($byId instanceof DOMElement) return $byId;
-
-        // Try with account ID appended
-        if ($this->accountId !== null) {
-            $byId = $this->dom->getElementById($prefix . $this->accountId);
-            if ($byId instanceof DOMElement) return $byId;
+    private function findBody(string $name): ?DOMElement {
+        $acc = $this->getAccountId();
+        foreach ([
+            'tbl' . $name . '_' . $acc . 'Body',
+            'tbl' . $name . $acc . 'Body',
+        ] as $candidate) {
+            $el = $this->dom->getElementById($candidate);
+            if ($el instanceof DOMElement) return $el;
         }
 
-        // Fall back to XPath starts-with
-        $xp = sprintf("//*[starts-with(@id, '%s')]", addslashes($prefix));
+        // Fallback: XPath search by id prefix
+        $xp = sprintf("//*[starts-with(@id, 'tbl%s')]", addslashes($name));
         $nodes = $this->xpath->query($xp);
         if ($nodes && $nodes->length > 0) {
-            $node = $nodes->item(0);
-            return $node instanceof DOMElement ? $node : null;
+            foreach ($nodes as $n) {
+                $id = $n->getAttribute('id');
+                if (substr($id, -4) === 'Body' && $n instanceof DOMElement) {
+                    return $n;
+                }
+            }
         }
         return null;
     }
 
-    private function matchesAny(string $haystack, array $needles): bool {
+    /**
+     * In a body div with rows like <tr><td>Label</td><td>Value</td></tr>,
+     * return the value cell text for the given label (case-insensitive).
+     */
+    private function labelLookup(DOMElement $body, string $label): ?string {
+        $rows = $this->xpath->query('.//tr', $body);
+        foreach ($rows as $row) {
+            $cells = $this->xpath->query('.//td|.//th', $row);
+            if ($cells->length < 2) continue;
+            $rowLabel = trim(preg_replace('/\s+/', ' ', $cells->item(0)->textContent));
+            if (strcasecmp($rowLabel, $label) === 0) {
+                return trim(preg_replace('/\s+/', ' ', $cells->item(1)->textContent));
+            }
+        }
+        return null;
+    }
+
+    private function labelHas(string $haystack, array $needles): bool {
         foreach ($needles as $n) {
             if (strpos($haystack, $n) !== false) return true;
         }
@@ -301,22 +356,19 @@ class IbkrParser {
     }
 
     /**
-     * "-20,850.00" -> -20850.00
-     * "(20,850.00)" -> -20850.00
-     * "" or "--" -> null
+     * "-20,850.00" → -20850.00
+     * "(20,850.00)" → -20850.00
+     * "&nbsp;" or "" or "--" → null
      */
     public static function parseMoney(?string $raw): ?float {
         if ($raw === null) return null;
-        $s = trim($raw);
-        if ($s === '' || $s === '--' || $s === '-') return null;
+        $s = trim(preg_replace('/\s+/', ' ', $raw));
+        $s = str_replace(["\xc2\xa0", "\xa0"], '', $s);
+        $s = trim($s);
+        if ($s === '' || $s === '--' || $s === '-' || $s === '&nbsp;') return null;
 
-        // Strip currency symbols, commas, spaces, %
-        $s = str_replace([',', '$', ' ', "\xc2\xa0"], '', $s);
-
-        // Parens => negative
-        if (preg_match('/^\((.+)\)$/', $s, $m)) {
-            $s = '-' . $m[1];
-        }
+        $s = str_replace([',', '$', ' '], '', $s);
+        if (preg_match('/^\((.+)\)$/', $s, $m)) $s = '-' . $m[1];
 
         if (!is_numeric($s)) return null;
         return (float)$s;
