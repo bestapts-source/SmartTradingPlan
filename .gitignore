@@ -1,5 +1,6 @@
 # Secrets
 api/config.local.php
+CLAUDE.local.md
 
 # Uploaded IBKR reports archive
 api/raw/*
