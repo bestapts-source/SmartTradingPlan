@@ -8,6 +8,7 @@ const NAV_PAGES = [
   { id: 'watchlist', label: 'Вотчлист',    href: 'watchlist.html' },
   { id: 'calc',      label: 'Калькулятор', href: 'calc.html' },
   { id: 'journal',   label: 'Дневник',     href: 'journal.html' },
+  { id: 'analytics', label: 'Аналитика',   href: 'analytics.php' },
   { id: 'rules',     label: 'Правила',     href: 'rules.html' },
 ];
 
