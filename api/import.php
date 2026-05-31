@@ -1,4 +1,5 @@
 <?php
+define('TRADING_BOOT', true);
 // ============================================================
 // import.php — POST IBKR HTML report → MySQL
 //

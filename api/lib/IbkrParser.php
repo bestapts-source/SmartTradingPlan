@@ -1,4 +1,5 @@
 <?php
+if (!defined('TRADING_BOOT')) { http_response_code(403); exit('Forbidden'); }
 // ============================================================
 // IbkrParser — parses Interactive Brokers Activity Statement HTML
 //
