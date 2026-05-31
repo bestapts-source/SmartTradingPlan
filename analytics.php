@@ -97,6 +97,38 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
   }
   .meta-row .k{color:var(--gold);}
   .empty{color:var(--muted); font-style:italic; padding:1rem;}
+
+  /* Notes per symbol */
+  .notes-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:10px;}
+  .note-card{
+    background:var(--bg2); border:.5px solid var(--border); border-radius:10px;
+    padding:1rem 1.1rem;
+  }
+  .note-head{
+    display:flex; justify-content:space-between; align-items:baseline;
+    margin-bottom:.5rem;
+  }
+  .note-head .ticker-sym{font-size:14px;}
+  .note-head .pl{font-family:'DM Mono',monospace; font-size:12px;}
+  .note-row{display:flex; gap:10px; margin-bottom:.5rem; align-items:center; flex-wrap:wrap;}
+  .note-row label{font-size:10px; color:var(--muted); font-family:'DM Mono',monospace;
+                  text-transform:uppercase; letter-spacing:.06em; min-width:80px;}
+  .note-row select, .note-row input[type=text], .note-row textarea{
+    flex:1; background:var(--bg3); color:var(--text);
+    border:.5px solid var(--border); border-radius:6px;
+    padding:6px 8px; font-family:'DM Mono',monospace; font-size:12px;
+  }
+  .note-row textarea{min-height:50px; resize:vertical; font-family:'DM Sans',sans-serif;}
+  .note-row select:focus, .note-row input:focus, .note-row textarea:focus{
+    outline:none; border-color:var(--gold);
+  }
+  .note-flags{display:flex; gap:14px; font-family:'DM Mono',monospace; font-size:11px; color:var(--muted);}
+  .note-flags label{display:flex; gap:6px; align-items:center; cursor:pointer;}
+  .note-saved{
+    font-family:'DM Mono',monospace; font-size:10px; color:var(--green); margin-left:8px;
+    opacity:0; transition:opacity .25s;
+  }
+  .note-saved.show{opacity:1;}
 </style>
 </head>
 <body data-page="analytics">
@@ -128,6 +160,10 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
   <!-- BLOCK 3: Winners / Losers -->
   <div class="sec-label">Символы недели · ранжирование по Realized P&L</div>
   <div id="ranksBox"></div>
+
+  <!-- BLOCK 5: Notes per symbol -->
+  <div class="sec-label">Заметки по символам · эмоции, оценка, урок</div>
+  <div id="notesBox"></div>
 
   <!-- BLOCK 7: Upload -->
   <div class="sec-label">Загрузить отчёт IBKR</div>
@@ -352,6 +388,101 @@ function renderRanks(data) {
     </table>`;
 }
 
+// ---- BLOCK 5: notes per symbol ----------------------------------
+const EMOTIONS_BEFORE = ['Calm','Confident','FOMO','Anxious','Greedy','Neutral'];
+const EMOTIONS_AFTER  = ['Satisfied','Regret','Neutral','Proud','Frustrated'];
+
+function renderNotes(data) {
+  const trades   = data.trades || [];
+  const symbols  = (data.rank_symbols || [])
+    .filter(s => s.symbol && s.realized_pl !== null);
+  if (symbols.length === 0) {
+    document.getElementById('notesBox').innerHTML =
+      '<div class="empty">Нет торгуемых символов на этой неделе.</div>';
+    return;
+  }
+  const notes   = data.notes || {};
+  const importId= data.import.id;
+  const optHtml = (list, current) => '<option value="">—</option>' +
+    list.map(v => `<option value="${v}" ${v===current?'selected':''}>${v}</option>`).join('');
+
+  document.getElementById('notesBox').innerHTML = `<div class="notes-grid">
+    ${symbols.map(s => {
+      const n = notes[s.symbol] || {};
+      const pl = Number(s.realized_pl || 0);
+      const plClass = pl > 0 ? 'pl-pos' : pl < 0 ? 'pl-neg' : '';
+      return `
+      <div class="note-card" data-symbol="${s.symbol}">
+        <div class="note-head">
+          <span class="ticker-sym">${s.symbol}</span>
+          <span class="pl ${plClass}">${fmt.money(pl)}</span>
+        </div>
+        <div class="note-row">
+          <label>До</label>
+          <select data-field="emotion_before">${optHtml(EMOTIONS_BEFORE, n.emotion_before)}</select>
+        </div>
+        <div class="note-row">
+          <label>После</label>
+          <select data-field="emotion_after">${optHtml(EMOTIONS_AFTER, n.emotion_after)}</select>
+        </div>
+        <div class="note-flags">
+          <label><input type="checkbox" data-field="good_trade" ${n.good_trade==1?'checked':''}> Хорошая сделка</label>
+          <label><input type="checkbox" data-field="regret_flag" ${n.regret_flag==1?'checked':''}> Regret</label>
+        </div>
+        <div class="note-row" style="margin-top:.5rem;">
+          <label>Урок</label>
+          <textarea data-field="lesson" placeholder="Что сделал бы иначе?">${n.lesson || ''}</textarea>
+        </div>
+        <div class="note-row">
+          <label>Заметка</label>
+          <textarea data-field="free_text" placeholder="Свободный текст…">${n.free_text || ''}</textarea>
+        </div>
+        <div class="note-saved" data-saved>сохранено ✓</div>
+      </div>`;
+    }).join('')}
+  </div>`;
+
+  // Wire up auto-save on change
+  document.querySelectorAll('#notesBox .note-card').forEach(card => {
+    const symbol = card.dataset.symbol;
+    let debounce = null;
+    const collect = () => {
+      const payload = { import_id: importId, symbol };
+      card.querySelectorAll('[data-field]').forEach(el => {
+        const k = el.dataset.field;
+        if (el.type === 'checkbox') payload[k] = el.checked ? 1 : 0;
+        else                        payload[k] = el.value || null;
+      });
+      return payload;
+    };
+    const save = async () => {
+      try {
+        await fetch(`${API_BASE}analytics.php?action=save_note&api_key=${encodeURIComponent(API_KEY)}`, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(collect())
+        }).then(r => r.json()).then(j => {
+          if (!j.success) throw new Error(j.error || 'save failed');
+        });
+        const flag = card.querySelector('[data-saved]');
+        flag.classList.add('show');
+        setTimeout(() => flag.classList.remove('show'), 1200);
+      } catch (e) {
+        const flag = card.querySelector('[data-saved]');
+        flag.textContent = '✗ ' + e.message;
+        flag.style.color = 'var(--red)';
+        flag.classList.add('show');
+      }
+    };
+    card.querySelectorAll('[data-field]').forEach(el => {
+      el.addEventListener('change', () => { clearTimeout(debounce); debounce = setTimeout(save, 250); });
+      if (el.tagName === 'TEXTAREA') {
+        el.addEventListener('blur', save);
+      }
+    });
+  });
+}
+
 function renderWeekSelect(imports, currentId) {
   const sel = document.getElementById('weekSelect');
   sel.innerHTML = imports.map(i =>
@@ -375,6 +506,7 @@ async function loadWeek(importId) {
     renderEquityCurve(week);
     renderPositions(week);
     renderRanks(week);
+    renderNotes(week);
   } catch (e) {
     document.getElementById('kpis').innerHTML =
       `<div class="empty pl-neg">Ошибка загрузки: ${e.message}</div>`;

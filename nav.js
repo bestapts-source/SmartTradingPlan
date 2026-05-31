@@ -7,7 +7,7 @@ const NAV_PAGES = [
   { id: 'plan',      label: 'План',        href: 'plan.html' },
   { id: 'watchlist', label: 'Вотчлист',    href: 'watchlist.html' },
   { id: 'calc',      label: 'Калькулятор', href: 'calc.html' },
-  { id: 'journal',   label: 'Дневник',     href: 'journal.html' },
+  { id: 'journal',   label: 'Дневник',     href: 'journal.php' },
   { id: 'analytics', label: 'Аналитика',   href: 'analytics.php' },
   { id: 'rules',     label: 'Правила',     href: 'rules.html' },
 ];

@@ -49,8 +49,47 @@ try {
             jsonResponse(['success' => true] + buildContinuation($pdo, $id));
             break;
 
+        case 'notes':
+            // GET all notes (for the journal page) — orphan + linked.
+            $rows = $pdo->query(
+                'SELECT n.id, n.import_id, n.symbol, n.note_date,
+                        n.setup, n.emotion_before, n.emotion_after,
+                        n.good_trade, n.regret_flag, n.lesson, n.free_text,
+                        n.created_at, n.updated_at,
+                        i.period_start, i.period_end
+                 FROM trade_notes n
+                 LEFT JOIN ibkr_imports i ON i.id = n.import_id
+                 ORDER BY COALESCE(n.note_date, n.updated_at) DESC, n.id DESC'
+            )->fetchAll();
+            jsonResponse(['success' => true, 'notes' => $rows]);
+            break;
+
+        case 'save_note':
+            // POST upsert. Body fields:
+            //   import_id (nullable), symbol (required), note_date (nullable),
+            //   setup, emotion_before, emotion_after, good_trade, regret_flag,
+            //   lesson, free_text
+            if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+                jsonError('save_note requires POST', 405);
+            }
+            $input = readJsonOrForm();
+            jsonResponse(['success' => true] + saveNote($pdo, $input));
+            break;
+
+        case 'delete_note':
+            if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+                jsonError('delete_note requires POST', 405);
+            }
+            $input = readJsonOrForm();
+            $noteId = (int)($input['id'] ?? 0);
+            if ($noteId <= 0) jsonError('id is required', 400);
+            $stmt = $pdo->prepare('DELETE FROM trade_notes WHERE id = ?');
+            $stmt->execute([$noteId]);
+            jsonResponse(['success' => true, 'deleted' => $stmt->rowCount()]);
+            break;
+
         default:
-            jsonError("Unknown action '$action'. Use: imports | weekly | continuation", 400);
+            jsonError("Unknown action '$action'. Use: imports | weekly | continuation | notes | save_note | delete_note", 400);
     }
 } catch (Throwable $e) {
     jsonError('Server error: ' . $e->getMessage(), 500);
@@ -178,6 +217,120 @@ function buildWeekly(PDO $pdo, int $id): array {
         'notes'         => $notesBySymbol,
         'review'        => $review,
     ];
+}
+
+// ============================================================
+// Notes (POST save_note)
+// ============================================================
+function readJsonOrForm(): array {
+    // Prefer JSON body, fall back to POST form fields
+    $raw = file_get_contents('php://input');
+    if ($raw !== '' && $raw !== false) {
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) return $decoded;
+    }
+    return $_POST;
+}
+
+function saveNote(PDO $pdo, array $input): array {
+    $symbol = trim((string)($input['symbol'] ?? ''));
+    if ($symbol === '') jsonError('symbol is required', 400);
+
+    $importId = $input['import_id'] ?? null;
+    if ($importId === '' || $importId === 0 || $importId === '0') $importId = null;
+    if ($importId !== null) $importId = (int)$importId;
+
+    $noteDate = trim((string)($input['note_date'] ?? ''));
+    if ($noteDate === '') $noteDate = null;
+
+    $allowedEmoBefore = ['Calm','Confident','FOMO','Anxious','Greedy','Neutral'];
+    $allowedEmoAfter  = ['Satisfied','Regret','Neutral','Proud','Frustrated'];
+
+    $emoBefore = $input['emotion_before'] ?? null;
+    if ($emoBefore !== null && !in_array($emoBefore, $allowedEmoBefore, true)) $emoBefore = null;
+    $emoAfter  = $input['emotion_after']  ?? null;
+    if ($emoAfter  !== null && !in_array($emoAfter,  $allowedEmoAfter,  true)) $emoAfter  = null;
+
+    $setup     = isset($input['setup'])      ? trim((string)$input['setup'])     : null;
+    $goodTrade = isset($input['good_trade']) ? (int)(bool)$input['good_trade']   : null;
+    $regret    = isset($input['regret_flag'])? (int)(bool)$input['regret_flag'] : 0;
+    $lesson    = $input['lesson']    ?? null;
+    $freeText  = $input['free_text'] ?? null;
+
+    // Auto-link to an import if note_date is inside its period and no import_id given.
+    if ($importId === null && $noteDate !== null) {
+        $q = $pdo->prepare('SELECT id FROM ibkr_imports
+                              WHERE ? BETWEEN period_start AND period_end
+                              ORDER BY id DESC LIMIT 1');
+        $q->execute([$noteDate]);
+        $found = $q->fetchColumn();
+        if ($found) $importId = (int)$found;
+    }
+
+    // The UNIQUE key is (import_id, symbol). When import_id is NULL, the unique
+    // index doesn't fire — so for orphan notes we manually look one up first.
+    if ($importId === null) {
+        $sel = $pdo->prepare('SELECT id FROM trade_notes
+                                WHERE import_id IS NULL AND symbol = ? AND COALESCE(note_date,"") = COALESCE(?,"")
+                                LIMIT 1');
+        $sel->execute([$symbol, $noteDate]);
+        $existingId = $sel->fetchColumn();
+        if ($existingId) {
+            $upd = $pdo->prepare(
+                'UPDATE trade_notes
+                    SET setup=?, emotion_before=?, emotion_after=?, good_trade=?, regret_flag=?, lesson=?, free_text=?,
+                        note_date=?
+                  WHERE id = ?'
+            );
+            $upd->execute([$setup, $emoBefore, $emoAfter, $goodTrade, $regret, $lesson, $freeText, $noteDate, $existingId]);
+            return ['id' => (int)$existingId, 'mode' => 'updated'];
+        }
+        $ins = $pdo->prepare(
+            'INSERT INTO trade_notes
+                (import_id, symbol, note_date, setup, emotion_before, emotion_after,
+                 good_trade, regret_flag, lesson, free_text)
+             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        );
+        $ins->execute([$symbol, $noteDate, $setup, $emoBefore, $emoAfter, $goodTrade, $regret, $lesson, $freeText]);
+        return ['id' => (int)$pdo->lastInsertId(), 'mode' => 'inserted'];
+    }
+
+    // import_id present → UNIQUE(import_id, symbol) lets us upsert
+    $sql = "INSERT INTO trade_notes
+               (import_id, symbol, note_date, setup, emotion_before, emotion_after,
+                good_trade, regret_flag, lesson, free_text)
+            VALUES
+               (:import_id, :symbol, :note_date, :setup, :emotion_before, :emotion_after,
+                :good_trade, :regret_flag, :lesson, :free_text)
+            ON DUPLICATE KEY UPDATE
+               note_date     = VALUES(note_date),
+               setup         = VALUES(setup),
+               emotion_before= VALUES(emotion_before),
+               emotion_after = VALUES(emotion_after),
+               good_trade    = VALUES(good_trade),
+               regret_flag   = VALUES(regret_flag),
+               lesson        = VALUES(lesson),
+               free_text     = VALUES(free_text)";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([
+        ':import_id'      => $importId,
+        ':symbol'         => $symbol,
+        ':note_date'      => $noteDate,
+        ':setup'          => $setup,
+        ':emotion_before' => $emoBefore,
+        ':emotion_after'  => $emoAfter,
+        ':good_trade'     => $goodTrade,
+        ':regret_flag'    => $regret,
+        ':lesson'         => $lesson,
+        ':free_text'      => $freeText,
+    ]);
+    $newId = (int)$pdo->lastInsertId();
+    if ($newId === 0) {
+        $sel = $pdo->prepare('SELECT id FROM trade_notes WHERE import_id = ? AND symbol = ? LIMIT 1');
+        $sel->execute([$importId, $symbol]);
+        $newId = (int)$sel->fetchColumn();
+    }
+    return ['id' => $newId, 'mode' => $stmt->rowCount() === 1 ? 'inserted' : 'updated'];
 }
 
 function buildContinuation(PDO $pdo, int $id): array {
