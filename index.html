@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<!-- ПРОЕКТ: Trading Plan · Vadim Shteiman · github.com/bestapts-source/TradingPlan -->
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Plan · Vadim Shteiman</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-page="index">
+
+<header id="site-header"></header>
+<nav class="nav" id="site-nav"></nav>
+
+<main>
+  <div class="sec-label">Обзор</div>
+  <div class="metrics">
+    <div class="metric"><div class="metric-label">Капитал</div><div class="metric-val">$105k</div></div>
+    <div class="metric"><div class="metric-label">Риск / сделка</div><div class="metric-val red">$800</div></div>
+    <div class="metric"><div class="metric-label">Цель / сделка</div><div class="metric-val green">$1,600</div></div>
+    <div class="metric"><div class="metric-label">R:R минимум</div><div class="metric-val">1:2</div></div>
+    <div class="metric"><div class="metric-label">Стоп-день</div><div class="metric-val red">$1,600</div></div>
+    <div class="metric"><div class="metric-label">Цель / неделя</div><div class="metric-val green">$2–5k</div></div>
+  </div>
+
+  <div class="sec-label">Быстрый доступ</div>
+  <div class="grid2">
+    <a href="calc.html" style="text-decoration:none;">
+      <div class="card blue" style="cursor:pointer;">
+        <span class="tag blue">→ Калькулятор</span>
+        <div class="card-title">Рассчитать вход</div>
+        <div class="card-body">Тикер · Вход · Стоп · Цель → Лот и R:R за секунду</div>
+      </div>
+    </a>
+    <a href="journal.html" style="text-decoration:none;">
+      <div class="card green" style="cursor:pointer;">
+        <span class="tag green">→ Дневник</span>
+        <div class="card-title">Записать сделку</div>
+        <div class="card-body">Синхронизация с Google Sheets в реальном времени</div>
+      </div>
+    </a>
+    <a href="watchlist.html" style="text-decoration:none;">
+      <div class="card amber" style="cursor:pointer;">
+        <span class="tag amber">→ Вотчлист</span>
+        <div class="card-title">Рабочие тикеры</div>
+        <div class="card-body">RKLB · BE · NBIS · ZM · NOW · IREN · FLY</div>
+      </div>
+    </a>
+    <a href="rules.html" style="text-decoration:none;">
+      <div class="card red" style="cursor:pointer;">
+        <span class="tag red">→ Правила</span>
+        <div class="card-title">Чеклист перед входом</div>
+        <div class="card-body">6 пунктов. Все обязательны. Нет — нет сделки.</div>
+      </div>
+    </a>
+  </div>
+
+  <div class="sec-label">Чёрный список</div>
+  <div class="card red">
+    <span class="tag red">Запрещено до июля 2026</span>
+    <div class="blacklist">
+      <div class="bl-item">ASTS <span class="bl-date">−$14,939</span></div>
+      <div class="bl-item">CRWV <span class="bl-date">−$9,256</span></div>
+      <div class="bl-item">ORCL <span class="bl-date">до 01.07.26</span></div>
+      <div class="bl-item">HUBS <span class="bl-date">до 01.07.26</span></div>
+      <div class="bl-item">SOXS <span class="bl-date">до 01.07.26</span></div>
+      <div class="bl-item">TMC <span class="bl-date">до 01.07.26</span></div>
+    </div>
+  </div>
+</main>
+
+<script src="nav.js"></script>
+</body>
+</html>

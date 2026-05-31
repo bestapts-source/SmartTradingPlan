@@ -1,0 +1,22 @@
+# =================================================================
+# Trading Analytics API — Apache rules
+# Protect config, library code, schema, and raw upload archive.
+# =================================================================
+
+# Disable directory listing
+Options -Indexes
+
+# Block direct access to sensitive files
+<FilesMatch "^(config\.php|.*\.sql|.*\.md)$">
+    Require all denied
+</FilesMatch>
+
+# Block the lib/ folder entirely (lib classes are require()'d, never served)
+RewriteEngine On
+RewriteRule ^lib/ - [F,L]
+
+# Block raw archive (uploaded .htm files)
+RewriteRule ^raw/ - [F,L]
+
+# Default MIME for .php endpoints (just in case)
+AddType application/x-httpd-php .php

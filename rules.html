@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<!-- МОДУЛЬ: Правила · Редактировать ТОЛЬКО этот файл для изменения правил и чеклиста -->
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Правила · Vadim Shteiman</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-page="rules">
+
+<header id="site-header"></header>
+<nav class="nav" id="site-nav"></nav>
+
+<main>
+  <div class="sec-label">6 правил — нарушать нельзя</div>
+
+  <div class="card red">
+    <span class="tag red">Правило 1 — критическое</span>
+    <div class="card-title">Стоп выставляется ДО входа, не после</div>
+    <div class="card-body">Нет стопа — нет сделки. Точка.</div>
+  </div>
+
+  <div class="card red">
+    <span class="tag red">Правило 2 — критическое</span>
+    <div class="card-title">Никогда не усредняться в убыток</div>
+    <div class="card-body">ORCL: вошёл по $166, докупал по $148 — итог −$6,679. Это не усреднение, это удвоение ставки на проигрыш.</div>
+  </div>
+
+  <div class="card red">
+    <span class="tag red">Правило 3 — критическое</span>
+    <div class="card-title">Чёрный список — 60 дней без обсуждений</div>
+    <div class="card-body">ASTS: убил в январе → вернулся → убил → вернулся → убил снова. Итог: −$14,939.</div>
+  </div>
+
+  <div class="card amber">
+    <span class="tag amber">Правило 4</span>
+    <div class="card-title">Лот — по формуле, не по ощущению</div>
+    <div class="card-body">CRWV 21 января: 2,000 акций при $90 = $180,000 при капитале $110,000. Калькулятор — обязателен.</div>
+  </div>
+
+  <div class="card amber">
+    <span class="tag amber">Правило 5</span>
+    <div class="card-title">Платформа закрыта 16:30–21:00</div>
+    <div class="card-body">Середина дня — низкий объём, случайные движения, максимальный соблазн. Стопы выставлены — не смотришь.</div>
+  </div>
+
+  <div class="card green">
+    <span class="tag green">Правило 6</span>
+    <div class="card-title">Делай больше того, что работает</div>
+    <div class="card-body">RKLB, BE, NBIS, ZM, NOW, FLY — это твой edge. 5–6 качественных сделок в месяц лучше 30 случайных.</div>
+  </div>
+
+  <div class="sec-label">Чеклист перед входом</div>
+  <div class="card gold">
+    <span class="tag gold">Все 6 пунктов — обязательно</span>
+    <ul class="checklist" id="entry-checklist">
+      <li onclick="toggleCheck(this)"><div class="cb">✓</div><span>Объём выше среднего 20-дневного минимум 1.5×</span></li>
+      <li onclick="toggleCheck(this)"><div class="cb">✓</div><span>Акция выше 20 EMA на дневном графике</span></li>
+      <li onclick="toggleCheck(this)"><div class="cb">✓</div><span>Чёткий уровень поддержки для стопа</span></li>
+      <li onclick="toggleCheck(this)"><div class="cb">✓</div><span>Цель минимум 2× риска видна на графике</span></li>
+      <li onclick="toggleCheck(this)"><div class="cb">✓</div><span>Нет отчётности в ближайшие 3 дня</span></li>
+      <li onclick="toggleCheck(this)"><div class="cb">✓</div><span>Инструмент НЕ в чёрном списке</span></li>
+    </ul>
+    <div id="checklist-result" style="margin-top:12px;font-family:'DM Mono',monospace;font-size:13px;color:var(--red);">✗ 0/6 — вход запрещён</div>
+  </div>
+
+  <div class="sec-label">Цели</div>
+  <div class="metrics">
+    <div class="metric"><div class="metric-label">Цель 3 мес</div><div class="metric-val green">+15–25%</div></div>
+    <div class="metric"><div class="metric-label">Цель 12 мес</div><div class="metric-val green">+40–60%</div></div>
+    <div class="metric"><div class="metric-label">Макс. просадка</div><div class="metric-val red">−10%</div></div>
+    <div class="metric"><div class="metric-label">Winrate цель</div><div class="metric-val">≥ 55%</div></div>
+  </div>
+
+  <div class="hlbox">
+    <strong>Итог:</strong> У тебя хороший глаз на вход. Проблема — управление проигрышами. Три позиции без стопов уничтожили результат 27 прибыльных сделок.
+  </div>
+</main>
+
+<script src="nav.js"></script>
+<script>
+function toggleCheck(li) {
+  li.classList.toggle('checked');
+  const all     = document.querySelectorAll('#entry-checklist li').length;
+  const checked = document.querySelectorAll('#entry-checklist li.checked').length;
+  const el      = document.getElementById('checklist-result');
+  if (checked === all) {
+    el.style.color = 'var(--green)'; el.textContent = '✓ Все 6 — вход разрешён';
+  } else {
+    el.style.color = 'var(--red)'; el.textContent = `✗ ${checked}/${all} — вход запрещён`;
+  }
+}
+</script>
+</body>
+</html>

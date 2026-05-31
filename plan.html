@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<!-- МОДУЛЬ: Торговый план · Редактировать этот файл для изменения плана/расписания -->
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>План · Vadim Shteiman</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-page="plan">
+
+<header id="site-header"></header>
+<nav class="nav" id="site-nav"></nav>
+
+<main>
+  <div class="sec-label">Расписание (летний период, Израиль)</div>
+  <div class="card blue">
+    <span class="tag blue">🌅 15:30–16:30 · Подготовка и открытие</span>
+    <div class="card-title">Первый час — вход</div>
+    <div class="timeline">
+      <div class="tl-item"><div class="tl-dot blue"></div><div class="tl-time">15:30–15:45</div><div class="tl-text">Открытие NYSE. <strong>Не торгуешь первые 15 минут.</strong> Смотришь объём, gap, реакцию.</div></div>
+      <div class="tl-item"><div class="tl-dot green"></div><div class="tl-time">15:45–16:15</div><div class="tl-text">Вход в 1–2 позиции. Только если все 6 пунктов чеклиста выполнены.</div></div>
+      <div class="tl-item"><div class="tl-dot amber"></div><div class="tl-time">16:15–16:30</div><div class="tl-text">Стоп и тейк в TWS. Платформа закрыта.</div></div>
+    </div>
+  </div>
+
+  <div class="card green">
+    <span class="tag green">🌆 21:00–22:00 · Управление</span>
+    <div class="card-title">Второй час — менеджмент</div>
+    <div class="timeline">
+      <div class="tl-item"><div class="tl-dot blue"></div><div class="tl-time">21:00–21:20</div><div class="tl-text">Открытые позиции: +1R → стоп в безубыток. +2R → закрой 50%.</div></div>
+      <div class="tl-item"><div class="tl-dot green"></div><div class="tl-time">21:20–21:45</div><div class="tl-text">Сетапы на завтра. Уровни входа, стопа, цели. Максимум 8 акций.</div></div>
+      <div class="tl-item"><div class="tl-dot amber"></div><div class="tl-time">21:45–22:00</div><div class="tl-text">Дневник. 5 предложений. Всё.</div></div>
+    </div>
+    <div class="card-note">С 16:30 до 21:00 — платформа закрыта.</div>
+  </div>
+
+  <div class="sec-label">Управление сделкой</div>
+  <div class="grid2">
+    <div class="card green">
+      <span class="tag green">В плюсе</span>
+      <div class="card-body">
+        +1R → стоп в безубыток<br>
+        +2R → закрой 50%, стоп на +1R<br>
+        +3R → закрой ещё 25%, трейл<br>
+        Оставшиеся 25% до цели
+      </div>
+    </div>
+    <div class="card red">
+      <span class="tag red">В минусе</span>
+      <div class="card-body">
+        Стоп сработал → <strong>выход без обсуждений</strong><br>
+        Не откупаешь в тот же день<br>
+        Записываешь в дневник — идёшь дальше
+      </div>
+    </div>
+  </div>
+
+  <div class="sec-label">Стоп-торговля</div>
+  <div class="card red">
+    <span class="tag red">Защита капитала</span>
+    <div class="card-title">Когда останавливаться</div>
+    <div class="card-body">
+      $1,600 за день → закрываешь платформу<br>
+      Два плохих дня подряд → пауза 2 дня<br>
+      Три убыточных недели → риск $400/сделку
+    </div>
+  </div>
+
+  <div class="sec-label">Чёрный список</div>
+  <div class="card red">
+    <span class="tag red">Запрещено до июля 2026</span>
+    <div class="card-body">Убыток больше $800 → инструмент в список на 60 дней.</div>
+    <div class="blacklist">
+      <div class="bl-item">ASTS <span class="bl-date">до 01.07.26</span></div>
+      <div class="bl-item">CRWV <span class="bl-date">до 01.07.26</span></div>
+      <div class="bl-item">ORCL <span class="bl-date">до 01.07.26</span></div>
+      <div class="bl-item">HUBS <span class="bl-date">до 01.07.26</span></div>
+      <div class="bl-item">SOXS <span class="bl-date">до 01.07.26</span></div>
+      <div class="bl-item">TMC <span class="bl-date">до 01.07.26</span></div>
+    </div>
+  </div>
+</main>
+
+<script src="nav.js"></script>
+</body>
+</html>

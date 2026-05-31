@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<!--
+МОДУЛЬ: Дневник · НЕ ТРОГАТЬ без необходимости — здесь живут данные
+API: https://script.google.com/macros/s/AKfycbyP1USuGcg3vyrC-2Qi0hWh8iZ4ISjyWkGsn6p-I4Sfkbo8n4-Ziq5FEBnCqAs6LCXn/exec
+Sheets ID: 1F_IBUe3urcC5FMo51KbMPnmN3tnIvMaLYq8iY99ku1U · Лист: Journal 1
+-->
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Дневник · Vadim Shteiman</title>
+<link rel="stylesheet" href="style.css">
+<style>
+#tradeLog{margin-top:16px;display:flex;flex-direction:column;gap:8px;}
+.trade-entry{background:var(--bg3);border:.5px solid var(--border);border-radius:10px;padding:12px 16px;font-size:13px;}
+.te-header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:4px;}
+.te-ticker{font-family:'DM Mono',monospace;font-weight:500;color:var(--text);font-size:15px;}
+.te-pnl{font-family:'DM Mono',monospace;font-size:15px;font-weight:500;}
+.te-pnl.pos{color:var(--green);}
+.te-pnl.neg{color:var(--red);}
+.te-meta{color:var(--muted);font-size:12px;margin-top:2px;}
+.te-why{color:var(--muted);font-size:12px;margin-top:6px;line-height:1.5;border-top:.5px solid var(--border);padding-top:6px;}
+.te-actions{display:flex;gap:6px;align-items:center;}
+.api-status{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-left:auto;}
+</style>
+</head>
+<body data-page="journal">
+
+<header id="site-header"></header>
+<nav class="nav" id="site-nav"></nav>
+
+<main>
+  <div class="sec-label">
+    Новая запись
+    <span class="api-status" id="api-status">Загружаю...</span>
+  </div>
+
+  <div class="card green">
+    <span class="tag green">5 минут после каждой сделки</span>
+    <div class="jform" style="margin-top:14px;" id="journal-form">
+      <input type="hidden" id="j-edit-id" value="">
+      <div class="jrow">
+        <div><label>Дата</label><input type="date" id="j-date"></div>
+        <div><label>Тикер</label><input type="text" id="j-ticker" placeholder="RKLB" style="text-transform:uppercase"></div>
+      </div>
+      <div class="jrow">
+        <div>
+          <label>Действие</label>
+          <select id="j-action">
+            <option value="open">Открыл позицию</option>
+            <option value="close-win">Закрыл в плюс</option>
+            <option value="close-loss">Закрыл в минус (стоп)</option>
+            <option value="adjust">Передвинул стоп</option>
+          </select>
+        </div>
+        <div><label>P&L ($)</label><input type="number" id="j-pnl" placeholder="+1600 или -800"></div>
+      </div>
+      <div class="jrow">
+        <div><label>Цена входа ($)</label><input type="number" id="j-entry" placeholder="75.00"></div>
+        <div><label>Лот (акций)</label><input type="number" id="j-lot" placeholder="320"></div>
+      </div>
+      <div class="jrow1">
+        <label>Что произошло?</label>
+        <textarea id="j-why" rows="3" placeholder="Увидел пробой с объёмом, вошёл на откате к 20 EMA..."></textarea>
+      </div>
+      <div class="jrow1">
+        <label>Эмоции (0=холодный, 10=паника)</label>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <input type="range" id="j-emotion" min="0" max="10" value="3" oninput="document.getElementById('emo-val').textContent=this.value" style="flex:1">
+          <span style="font-family:'DM Mono',monospace;font-size:13px;color:var(--muted);min-width:50px;">Ур: <span id="emo-val">3</span>/10</span>
+        </div>
+      </div>
+      <div class="jrow1">
+        <label>Что сделал бы по-другому?</label>
+        <textarea id="j-lesson" rows="2" placeholder="Вышел слишком рано..."></textarea>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn" onclick="saveEntry()" id="save-btn">Сохранить</button>
+        <button class="btn secondary" id="cancel-edit-btn" onclick="cancelEdit()" style="display:none">Отмена</button>
+        <button class="btn secondary" onclick="exportLog()">Экспорт CSV</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tradeLog"></div>
+  <div id="journal-summary" class="summary-bar" style="display:none;"></div>
+</main>
+
+<script src="nav.js"></script>
+<script>
+const API = 'https://script.google.com/macros/s/AKfycbyP1USuGcg3vyrC-2Qi0hWh8iZ4ISjyWkGsn6p-I4Sfkbo8n4-Ziq5FEBnCqAs6LCXn/exec';
+let trades = [];
+
+const actionLabel = { 'open':'Открыл', 'close-win':'Закрыл ✓', 'close-loss':'Стоп ✗', 'adjust':'Стоп →' };
+const actionColor = { 'open':'var(--blue)', 'close-win':'var(--green)', 'close-loss':'var(--red)', 'adjust':'var(--amber)' };
+
+function setStatus(msg, color) {
+  const el = document.getElementById('api-status');
+  if (el) { el.textContent = msg; el.style.color = color || 'var(--muted)'; }
+}
+
+async function apiCall(params) {
+  const url = API + '?' + new URLSearchParams(params).toString();
+  const res = await fetch(url);
+  return res.json();
+}
+
+async function loadTrades() {
+  setStatus('Загружаю...', 'var(--amber)');
+  try {
+    const data = await apiCall({ action: 'read' });
+    if (!data.ok) throw new Error('API error');
+    trades = (data.trades || []).map(row => ({
+      id:      row['ID'],
+      date:    row['Дата'],
+      ticker:  row['Тикер'],
+      action:  row['Действие'],
+      pnl:     parseFloat(row['P&L']) || 0,
+      entry:   row['Вход'],
+      lot:     row['Лот'],
+      emotion: row['Эмоции'],
+      why:     row['Что произошло'],
+      lesson:  row['Урок'],
+    })).filter(t => t.date && t.ticker).reverse();
+    setStatus('Синхронизировано ✓', 'var(--green)');
+    renderLog();
+  } catch(e) {
+    setStatus('Ошибка загрузки', 'var(--red)');
+  }
+}
+
+document.getElementById('j-date').value = new Date().toISOString().split('T')[0];
+
+async function saveEntry() {
+  const editId  = document.getElementById('j-edit-id').value;
+  const date    = document.getElementById('j-date').value;
+  const ticker  = document.getElementById('j-ticker').value.trim().toUpperCase();
+  const action  = document.getElementById('j-action').value;
+  const pnl     = parseFloat(document.getElementById('j-pnl').value) || 0;
+  const entry   = document.getElementById('j-entry').value;
+  const lot     = document.getElementById('j-lot').value;
+  const why     = document.getElementById('j-why').value;
+  const lesson  = document.getElementById('j-lesson').value;
+  const emotion = document.getElementById('j-emotion').value;
+
+  if (!ticker || !date) { alert('Укажи дату и тикер'); return; }
+
+  const id = editId || String(Date.now());
+  const trade = {
+    'ID': id, 'Дата': date, 'Тикер': ticker, 'Действие': action,
+    'P&L': pnl, 'Вход': entry, 'Лот': lot, 'Эмоции': emotion,
+    'Что произошло': why, 'Урок': lesson
+  };
+
+  const btn = document.getElementById('save-btn');
+  btn.textContent = 'Сохраняю...';
+  btn.disabled = true;
+  setStatus('Сохраняю...', 'var(--amber)');
+
+  try {
+    const res = await apiCall({ action: editId ? 'update' : 'save', trade: JSON.stringify(trade) });
+    if (!res.ok) throw new Error();
+    setStatus('Сохранено ✓', 'var(--green)');
+    if (editId) cancelEdit(); else clearForm();
+    await loadTrades();
+  } catch(e) {
+    setStatus('Ошибка сохранения', 'var(--red)');
+    alert('Не удалось сохранить. Проверь соединение.');
+  } finally {
+    btn.textContent = editId ? 'Сохранить изменения' : 'Сохранить';
+    btn.disabled = false;
+  }
+}
+
+function editEntry(id) {
+  const t = trades.find(t => String(t.id) === String(id));
+  if (!t) return;
+  document.getElementById('j-edit-id').value  = t.id;
+  document.getElementById('j-date').value     = t.date;
+  document.getElementById('j-ticker').value   = t.ticker;
+  document.getElementById('j-action').value   = t.action;
+  document.getElementById('j-pnl').value      = t.pnl || '';
+  document.getElementById('j-entry').value    = t.entry || '';
+  document.getElementById('j-lot').value      = t.lot || '';
+  document.getElementById('j-why').value      = t.why || '';
+  document.getElementById('j-lesson').value   = t.lesson || '';
+  document.getElementById('j-emotion').value  = t.emotion || 3;
+  document.getElementById('emo-val').textContent = t.emotion || 3;
+  document.getElementById('save-btn').textContent = 'Сохранить изменения';
+  document.getElementById('cancel-edit-btn').style.display = '';
+  document.getElementById('journal-form').scrollIntoView({ behavior:'smooth', block:'start' });
+}
+
+function cancelEdit() {
+  document.getElementById('j-edit-id').value = '';
+  document.getElementById('save-btn').textContent = 'Сохранить';
+  document.getElementById('cancel-edit-btn').style.display = 'none';
+  clearForm();
+}
+
+function clearForm() {
+  ['j-ticker','j-pnl','j-entry','j-lot','j-why','j-lesson'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('j-emotion').value = 3;
+  document.getElementById('emo-val').textContent = '3';
+  document.getElementById('j-date').value = new Date().toISOString().split('T')[0];
+}
+
+async function deleteEntry(id) {
+  if (!confirm('Удалить запись?')) return;
+  setStatus('Удаляю...', 'var(--amber)');
+  try {
+    const res = await apiCall({ action: 'delete', id: String(id) });
+    if (!res.ok) throw new Error();
+    setStatus('Удалено ✓', 'var(--green)');
+    await loadTrades();
+  } catch(e) {
+    setStatus('Ошибка удаления', 'var(--red)');
+  }
+}
+
+function renderLog() {
+  const el  = document.getElementById('tradeLog');
+  const sum = document.getElementById('journal-summary');
+  if (trades.length === 0) {
+    el.innerHTML = '<div style="text-align:center;padding:2rem;font-size:13px;color:var(--muted)">Пока нет записей</div>';
+    sum.style.display = 'none';
+    return;
+  }
+  el.innerHTML = trades.map(t => {
+    const pnlHtml = t.pnl !== 0
+      ? `<span class="te-pnl ${t.pnl > 0 ? 'pos' : 'neg'}">${t.pnl > 0 ? '+' : ''}$${t.pnl}</span>` : '';
+    const meta = [];
+    if (t.entry) meta.push(`@$${t.entry}`);
+    if (t.lot) meta.push(`${t.lot} шт`);
+    if (t.emotion !== undefined && t.emotion !== '') meta.push(`эмоции: ${t.emotion}/10`);
+    return `
+    <div class="trade-entry" id="entry-${t.id}">
+      <div class="te-header">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span class="te-ticker">${t.ticker}</span>
+          <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(255,255,255,0.06);color:${actionColor[t.action]||'var(--muted)'};">${actionLabel[t.action]||t.action}</span>
+          <span style="font-size:12px;color:var(--muted);">${t.date}</span>
+          ${meta.length ? `<span class="te-meta">${meta.join(' · ')}</span>` : ''}
+        </div>
+        <div class="te-actions">
+          ${pnlHtml}
+          <button class="btn sm secondary" onclick="editEntry('${t.id}')">Изменить</button>
+          <button class="btn sm danger" onclick="deleteEntry('${t.id}')">✕</button>
+        </div>
+      </div>
+      ${t.why ? `<div class="te-why">${t.why}${t.lesson ? `<br><span style="color:var(--amber)">→ ${t.lesson}</span>` : ''}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  const closed   = trades.filter(t => t.action === 'close-win' || t.action === 'close-loss');
+  const totalPnl = closed.reduce((a, t) => a + (t.pnl || 0), 0);
+  const wins     = closed.filter(t => (t.pnl || 0) > 0).length;
+  const wr       = closed.length ? Math.round(wins / closed.length * 100) : 0;
+
+  sum.style.display = 'flex';
+  sum.innerHTML = `
+    <div class="sb-item"><span class="sb-val" style="color:${totalPnl>=0?'var(--green)':'var(--red)'}">${totalPnl>=0?'+':''}$${totalPnl.toFixed(0)}</span><span class="sb-label">Общий P&L</span></div>
+    <div class="sb-item"><span class="sb-val">${closed.length}</span><span class="sb-label">Закрытых</span></div>
+    <div class="sb-item"><span class="sb-val" style="color:${wr>=55?'var(--green)':'var(--amber)'}">${wr}%</span><span class="sb-label">Winrate</span></div>
+    <div class="sb-item"><span class="sb-val" style="color:var(--green)">${wins}</span><span class="sb-label">Прибыльных</span></div>
+    <div class="sb-item"><span class="sb-val" style="color:var(--red)">${closed.length-wins}</span><span class="sb-label">По стопу</span></div>
+    <div class="sb-item"><span class="sb-val">${trades.length}</span><span class="sb-label">Всего записей</span></div>
+  `;
+}
+
+function exportLog() {
+  if (trades.length === 0) { alert('Нет записей'); return; }
+  const rows = [['Дата','Тикер','Действие','P&L','Вход','Лот','Эмоции','Что произошло','Урок','ID']];
+  trades.forEach(t => rows.push([t.date,t.ticker,t.action,t.pnl,t.entry,t.lot,t.emotion,t.why,t.lesson,t.id]));
+  const csv = rows.map(r => r.map(c => '"'+(c||'').toString().replace(/"/g,'""')+'"').join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,\uFEFF' + encodeURIComponent(csv);
+  a.download = 'trading_journal_vadim.csv';
+  a.click();
+}
+
+loadTrades();
+</script>
+</body>
+</html>

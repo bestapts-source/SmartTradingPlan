@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<!-- МОДУЛЬ: Калькулятор · Редактировать ТОЛЬКО этот файл для изменения калькулятора -->
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Калькулятор · Vadim Shteiman</title>
+<link rel="stylesheet" href="style.css">
+<style>
+.quick-row{display:grid;grid-template-columns:90px 110px 110px 110px;gap:8px;align-items:end;margin-bottom:12px;}
+@media(max-width:600px){.quick-row{grid-template-columns:1fr 1fr;}}
+.quick-row label{font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;letter-spacing:.06em;text-transform:uppercase;display:block;margin-bottom:4px;}
+.quick-row input{background:var(--bg3);border:.5px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-family:'DM Mono',monospace;font-size:15px;font-weight:500;width:100%;outline:none;transition:border-color .2s;}
+.quick-row input:focus{border-color:rgba(195,165,76,0.5);}
+.quick-row input::placeholder{font-size:12px;font-weight:400;}
+.calc-result{background:var(--green-dim);border:.5px solid rgba(61,214,140,0.2);border-radius:10px;padding:1.25rem 1.5rem;margin-top:14px;font-family:'DM Mono',monospace;font-size:13px;color:var(--green);line-height:2.2;display:none;}
+.calc-result strong{color:var(--text);}
+.calc-result .big{font-size:24px;font-weight:500;}
+.calc-result .warn{color:var(--amber);}
+.calc-result .err{color:var(--red);}
+.calc-reset{background:none;border:none;color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;cursor:pointer;padding:0;margin-left:12px;text-decoration:underline;text-underline-offset:2px;}
+.calc-reset:hover{color:var(--text);}
+</style>
+</head>
+<body data-page="calc">
+
+<header id="site-header"></header>
+<nav class="nav" id="site-nav"></nav>
+
+<main>
+  <div class="sec-label">Быстрый расчёт</div>
+  <div class="card blue">
+    <span class="tag blue">Tab между полями — результат мгновенно</span>
+    <div class="card-title">Вход · Стоп · Цель</div>
+
+    <div style="margin-top:14px;" class="jform">
+      <div class="quick-row">
+        <div>
+          <label>Тикер</label>
+          <input type="text" id="c-ticker" placeholder="RKLB" oninput="calcPos()" style="text-transform:uppercase">
+        </div>
+        <div>
+          <label>Вход ($)</label>
+          <input type="number" id="c-entry" placeholder="75.00" step="0.01" oninput="calcPos()" onkeydown="tabNext(event,'c-stop')">
+        </div>
+        <div>
+          <label>Стоп ($)</label>
+          <input type="number" id="c-stop" placeholder="72.50" step="0.01" oninput="calcPos()" onkeydown="tabNext(event,'c-target')">
+        </div>
+        <div>
+          <label>Цель ($)</label>
+          <input type="number" id="c-target" placeholder="80.00" step="0.01" oninput="calcPos()">
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:6px;">
+        <div style="flex:1;min-width:140px;">
+          <label>Капитал ($)</label>
+          <input type="number" id="c-capital" value="104927" oninput="calcPos()">
+        </div>
+        <div style="flex:1;min-width:120px;">
+          <label>Риск (%)</label>
+          <input type="number" id="c-risk-pct" value="0.75" step="0.05" oninput="calcPos()">
+        </div>
+        <div style="display:flex;gap:8px;padding-bottom:2px;">
+          <button class="btn sm" onclick="calcPos()">Рассчитать</button>
+          <button class="calc-reset" onclick="resetCalc()">Сбросить</button>
+        </div>
+      </div>
+
+      <div id="calc-result" class="calc-result"></div>
+    </div>
+  </div>
+
+  <div class="sec-label">Формула</div>
+  <div class="formula">
+    Риск в $ = <strong>Капитал × % риска</strong><br>
+    Лот = <strong>Риск $ ÷ (Вход − Стоп)</strong><br>
+    Цель 2R = <strong>Вход + (Вход − Стоп) × 2</strong><br>
+    Цель 3R = <strong>Вход + (Вход − Стоп) × 3</strong>
+  </div>
+</main>
+
+<script src="nav.js"></script>
+<script>
+function tabNext(e, nextId) {
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    document.getElementById(nextId).focus();
+    calcPos();
+  }
+}
+
+function calcPos() {
+  const capital  = parseFloat(document.getElementById('c-capital').value) || 0;
+  const riskPct  = parseFloat(document.getElementById('c-risk-pct').value) || 0;
+  const entry    = parseFloat(document.getElementById('c-entry').value);
+  const stop     = parseFloat(document.getElementById('c-stop').value);
+  const target   = parseFloat(document.getElementById('c-target').value);
+  const ticker   = (document.getElementById('c-ticker').value || '').toUpperCase();
+  const el       = document.getElementById('calc-result');
+
+  if (!entry || !stop || entry <= stop) { el.style.display = 'none'; return; }
+
+  const riskUsd   = capital * riskPct / 100;
+  const diff      = entry - stop;
+  const lot       = Math.floor(riskUsd / diff);
+  if (lot <= 0) { el.style.display = 'none'; return; }
+
+  const rr2       = entry + diff * 2;
+  const rr3       = entry + diff * 3;
+  const profit2   = lot * (rr2 - entry);
+  const profit3   = lot * (rr3 - entry);
+  const actualRisk= lot * diff;
+  const rrActual  = target ? ((target - entry) / diff).toFixed(1) : null;
+  const posSize   = lot * entry;
+  const pctOfCap  = (posSize / capital * 100).toFixed(1);
+
+  const sizeWarn  = posSize > capital * 0.5
+    ? `<br><span class="warn">⚠ Позиция ${pctOfCap}% от капитала — осторожно</span>` : '';
+  const rrWarn    = rrActual && rrActual < 2
+    ? `<br><span class="err">✗ R:R = ${rrActual} — ниже минимума 2R</span>` : '';
+
+  el.style.display = 'block';
+  el.innerHTML = `
+    ${ticker ? `<strong>${ticker}</strong> &nbsp;` : ''}<strong>@$${entry}</strong> &nbsp; Стоп $${stop}<br>
+    Лот: <span class="big">${lot} акций</span> &nbsp; ($${posSize.toLocaleString('ru')})<br>
+    Риск: <strong>$${actualRisk.toFixed(0)}</strong> (${riskPct}% капитала)<br>
+    Цель 2R → $${rr2.toFixed(2)}: <strong>+$${profit2.toFixed(0)}</strong><br>
+    Цель 3R → $${rr3.toFixed(2)}: <strong>+$${profit3.toFixed(0)}</strong>
+    ${rrActual ? `<br>Твоя цель: <strong>${rrActual}R</strong>${rrWarn}` : ''}${sizeWarn}
+  `;
+}
+
+function resetCalc() {
+  ['c-ticker','c-entry','c-stop','c-target'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('calc-result').style.display = 'none';
+  document.getElementById('c-ticker').focus();
+}
+</script>
+</body>
+</html>

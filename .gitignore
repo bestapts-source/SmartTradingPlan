@@ -1,0 +1,15 @@
+# Secrets
+api/config.local.php
+
+# Uploaded IBKR reports archive
+api/raw/*
+!api/raw/.gitkeep
+
+# Local dev / OS
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*.bak
+.idea/
+.vscode/
