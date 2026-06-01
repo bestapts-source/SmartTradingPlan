@@ -129,6 +129,36 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
     opacity:0; transition:opacity .25s;
   }
   .note-saved.show{opacity:1;}
+
+  /* Claude review export */
+  .review-card{
+    background:var(--bg2); border:.5px solid var(--border); border-radius:12px;
+    border-left:2px solid var(--gold);
+    padding:1.25rem 1.5rem; margin-bottom:10px;
+  }
+  .review-text{font-size:13px; color:var(--muted); line-height:1.6; margin-bottom:1rem;}
+  .review-text a{color:var(--gold); text-decoration:none;}
+  .review-text a:hover{text-decoration:underline;}
+  .review-actions{display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
+  .btn-gold{
+    background:var(--gold); color:#0e0f0d; border:none; border-radius:8px;
+    padding:9px 18px; font-family:'DM Mono',monospace; font-size:12px; font-weight:500;
+    text-transform:uppercase; letter-spacing:.06em; cursor:pointer;
+  }
+  .btn-gold:hover{filter:brightness(1.1);}
+  .btn-secondary{
+    background:var(--bg3); color:var(--text);
+    border:.5px solid var(--border); border-radius:8px;
+    padding:8px 16px; font-family:'DM Mono',monospace; font-size:12px;
+    text-decoration:none; text-transform:uppercase; letter-spacing:.06em;
+  }
+  .btn-secondary:hover{border-color:var(--gold); color:var(--gold);}
+  .review-feedback{
+    font-family:'DM Mono',monospace; font-size:11px;
+    opacity:0; transition:opacity .25s;
+  }
+  .review-feedback.ok{color:var(--green); opacity:1;}
+  .review-feedback.err{color:var(--red);  opacity:1;}
 </style>
 </head>
 <body data-page="analytics">
@@ -164,6 +194,29 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
   <!-- BLOCK 5: Notes per symbol -->
   <div class="sec-label">Заметки по символам · эмоции, оценка, урок</div>
   <div id="notesBox"></div>
+
+  <!-- BLOCK 6 (preview): export to Claude for full review -->
+  <div class="sec-label">Разбор недели</div>
+  <div class="review-card">
+    <div class="review-text">
+      Соберу все данные этой недели + контекст последних 4 недель + твои заметки в один markdown-пейлоад
+      и положу в буфер обмена. Откроешь <a href="https://claude.ai" target="_blank">claude.ai</a>,
+      нажмёшь Ctrl+V — получишь развёрнутый разбор как в твоих прошлых сессиях.
+    </div>
+    <div class="review-actions">
+      <button class="btn-gold" id="copyReviewBtn" type="button">📋 Скопировать разбор для Claude</button>
+      <a class="btn-secondary" href="https://claude.ai" target="_blank" id="openClaudeBtn">Открыть Claude →</a>
+      <span class="review-feedback" id="reviewFeedback"></span>
+    </div>
+    <details style="margin-top:1rem;">
+      <summary style="cursor:pointer; font-family:'DM Mono',monospace; font-size:11px; color:var(--muted);">
+        ▸ Показать что будет скопировано
+      </summary>
+      <pre id="reviewPreview" style="white-space:pre-wrap; background:var(--bg3); padding:12px;
+           border-radius:8px; font-family:'DM Mono',monospace; font-size:11px; color:var(--muted);
+           max-height:300px; overflow:auto; margin-top:8px;"></pre>
+    </details>
+  </div>
 
   <!-- BLOCK 7: Upload -->
   <div class="sec-label">Загрузить отчёт IBKR</div>
@@ -491,6 +544,151 @@ function renderWeekSelect(imports, currentId) {
   sel.onchange = () => loadWeek(sel.value);
 }
 
+// ---- BLOCK 6: Claude review payload --------------------------
+let lastWeekData = null;
+let allImports   = [];
+
+function buildReviewPayload(week, imports) {
+  const imp     = week.import;
+  const st      = week.stats;
+  const trades  = week.trades || [];
+  const pos     = week.open_positions || [];
+  const ranks   = (week.rank_symbols || [])
+                   .filter(s => s.realized_pl != null || s.unrealized_pl != null);
+  const notes   = week.notes || {};
+  const eqPts   = (week.equity_curve && week.equity_curve.points) || [];
+
+  // Helper
+  const m = v => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(2);
+  const r = v => v == null ? '—' : Number(v).toFixed(2);
+  const ilDate = s => s ? new Date(s.replace(' ','T') + 'Z').toLocaleString('he-IL',
+                          {timeZone:'Asia/Jerusalem', year:'2-digit', month:'2-digit', day:'2-digit',
+                           hour:'2-digit', minute:'2-digit'}) : '';
+
+  // Previous weeks context — pull from imports list, exclude current
+  const prevWeeks = imports
+    .filter(i => i.id !== imp.id)
+    .slice(0, 4)
+    .map(i => `- ${i.period_start} → ${i.period_end}: NAV ${m(i.nav_change)}, TWR ${i.twr}%`)
+    .join('\n');
+
+  // Trades table
+  const tradeLines = trades.map(t => {
+    const dt = ilDate(t.trade_datetime);
+    const qty = Number(t.quantity);
+    const side = qty > 0 ? 'BUY' : 'SELL';
+    const code = t.trade_code ? ` [${t.trade_code}]` : '';
+    return `- ${t.symbol} | ${dt} | ${side} ${Math.abs(qty)} @ $${r(t.trade_price)} | proceeds ${m(t.proceeds)} | realized ${m(t.realized_pl)} | MTM ${m(t.mtm_pl)}${code}`;
+  }).join('\n');
+
+  // Open positions
+  const posLines = pos.map(p => {
+    const u = Number(p.unrealized_pl);
+    const pct = (u / (Math.abs(p.quantity) * p.avg_cost) * 100).toFixed(2);
+    const note = notes[p.symbol];
+    const noteStr = note ? ` | note: ${note.lesson || note.free_text || ''}`.slice(0, 80) : '';
+    const rec = p.recommendation || {};
+    return `- ${p.symbol}: ${p.quantity} @ avg $${r(p.avg_cost)} → close $${r(p.close_price)}, unrealized ${m(p.unrealized_pl)} (${pct}%), action: ${rec.action || '—'}${noteStr}`;
+  }).join('\n');
+
+  // Symbol ranking (top winners + losers + holdings)
+  const ranked = ranks.slice(0, 15).map(s => {
+    const realized = Number(s.realized_pl || 0);
+    const ytd = Number(s.ytd_pl || 0);
+    return `- ${s.symbol} (${s.asset_class || 'Stock'}): week realized ${m(s.realized_pl)}, unrealized ${m(s.unrealized_pl)}, week total ${m(s.total_pl)}, YTD ${m(s.ytd_pl)} (${s.trade_count || 0} trades)`;
+  }).join('\n');
+
+  // Notes
+  const noteLines = Object.values(notes).map(n => {
+    const tags = [];
+    if (n.good_trade == 1)  tags.push('GOOD');
+    if (n.regret_flag == 1) tags.push('REGRET');
+    const meta = [];
+    if (n.emotion_before) meta.push(`before=${n.emotion_before}`);
+    if (n.emotion_after)  meta.push(`after=${n.emotion_after}`);
+    if (n.setup)          meta.push(`setup="${n.setup}"`);
+    return `- ${n.symbol}${tags.length ? ' [' + tags.join(',') + ']' : ''} ${meta.join(' ')}\n  lesson: ${n.lesson || '—'}\n  text: ${(n.free_text || '—').replace(/\n/g, ' | ')}`;
+  }).join('\n');
+
+  // Equity curve per day
+  const eqLines = eqPts.map(p =>
+    `- ${p.date}: day ${m(p.realized_day)}, cum ${m(p.realized_cum)}`
+  ).join('\n');
+
+  return `# Разбор торговой недели
+
+## Контекст трейдера
+Vadim Shteiman · IBKR ${imp.account_id} · свинг-трейдинг NYSE/NASDAQ из Израиля
+- Капитал ~$105k · риск $800/сделку · мин. R:R 1:2
+- Цель $2-5k/неделю · 2-4 сделки/неделю
+- YTD на минимумах — идёт восстановление
+
+## Эта неделя: ${imp.period_start} → ${imp.period_end}
+
+### KPI
+- NAV: $${r(imp.nav_start)} → $${r(imp.nav_end)} (${m(imp.nav_change)})
+- TWR: ${imp.twr}%
+- Realized: ${m(st.total_realized)}, Avg/trade: ${m(st.avg_pl)}
+- Win rate: ${st.win_rate}% (${st.winners}W / ${st.losers}L из ${st.closing_trades} закрытых)
+- Best: ${m(st.best_trade)}, Worst: ${m(st.worst_trade)}
+- Commissions: ${m(imp.commissions)}, Dividends: ${m(imp.dividends)}, Interest: ${m(imp.interest)}
+
+### Equity curve по дням
+${eqLines || '(нет данных)'}
+
+### Сделки (${trades.length})
+${tradeLines || '(нет сделок)'}
+
+### Открытые позиции на конец недели (${pos.length})
+${posLines || '(нет открытых позиций)'}
+
+Алгоритмическая рекомендация (rule-based из дашборда):
+- CONTINUE если unrealized > +5% и нет regret
+- REDUCE если unrealized между -3% и +5%
+- CUT если unrealized < -3% или regret_flag=1
+
+### Ранжирование по символам (top 15)
+${ranked || '(нет данных)'}
+
+### Заметки трейдера за неделю (эмоции + уроки)
+${noteLines || '(заметок нет)'}
+
+## Контекст последних недель
+${prevWeeks || '(нет)'}
+
+---
+
+## Что нужно от тебя как от аналитика:
+
+1. **Разбор недели**: что сработало, что нет — конкретно по тикерам, с цифрами.
+2. **Эмоциональные паттерны**: посмотри на emotion_before/after vs result. Где FOMO/Greedy дали результат, где Calm/Confident.
+3. **Открытые позиции**: для каждой — где ставить стоп, фиксировать ли часть, или держать. Объясни логику.
+4. **План на следующую неделю**: focus tickers (продолжать), avoid (избегать), на что особенно обратить внимание.
+5. **Если чего-то не хватает в данных или нужно уточнение** — задай вопрос, не выдумывай.
+
+Отвечай как опытный аналитик: конкретно, без воды, с цифрами. Можно использовать таблицы и markdown.
+`;
+}
+
+async function copyReview() {
+  const fb = document.getElementById('reviewFeedback');
+  if (!lastWeekData) {
+    fb.className = 'review-feedback err';
+    fb.textContent = 'нет данных — подожди загрузки';
+    return;
+  }
+  const payload = buildReviewPayload(lastWeekData, allImports);
+  document.getElementById('reviewPreview').textContent = payload;
+  try {
+    await navigator.clipboard.writeText(payload);
+    fb.className = 'review-feedback ok';
+    fb.textContent = `✓ скопировано (${payload.length} символов) — открой Claude и вставь Ctrl+V`;
+  } catch (e) {
+    fb.className = 'review-feedback err';
+    fb.textContent = '✗ ошибка копирования: ' + e.message;
+  }
+}
+
 // ---- Orchestrator ------------------------------------------
 async function loadWeek(importId) {
   try {
@@ -501,12 +699,16 @@ async function loadWeek(importId) {
       return;
     }
     const week = await api('weekly', importId ? { import_id: importId } : {});
+    lastWeekData = week;
+    allImports   = list.imports;
     renderWeekSelect(list.imports, week.import.id);
     renderKpis(week);
     renderEquityCurve(week);
     renderPositions(week);
     renderRanks(week);
     renderNotes(week);
+    // Pre-fill the preview pane so user can see what'll be copied
+    document.getElementById('reviewPreview').textContent = buildReviewPayload(week, list.imports);
   } catch (e) {
     document.getElementById('kpis').innerHTML =
       `<div class="empty pl-neg">Ошибка загрузки: ${e.message}</div>`;
@@ -553,6 +755,7 @@ function setupUpload() {
 // ---- Bootstrap ---------------------------------------------
 loadWeek();
 setupUpload();
+document.getElementById('copyReviewBtn').addEventListener('click', copyReview);
 </script>
 </body>
 </html>
