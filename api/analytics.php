@@ -18,6 +18,7 @@ define('TRADING_BOOT', true);
 require __DIR__ . '/config.php';
 require __DIR__ . '/lib/Db.php';
 require __DIR__ . '/lib/Recommender.php';
+require __DIR__ . '/lib/Reviewer.php';
 
 handleCorsPreflight();
 
@@ -47,6 +48,12 @@ try {
         case 'continuation':
             $id = resolveImportId($pdo, $_GET['import_id'] ?? null);
             jsonResponse(['success' => true] + buildContinuation($pdo, $id));
+            break;
+
+        case 'auto_review':
+            // Deterministic rule-based review — no LLM
+            $id = resolveImportId($pdo, $_GET['import_id'] ?? null);
+            jsonResponse(['success' => true] + Reviewer::analyze($pdo, $id));
             break;
 
         case 'notes':

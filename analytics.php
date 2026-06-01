@@ -130,6 +130,34 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
   }
   .note-saved.show{opacity:1;}
 
+  /* Auto-review (PHP rule-based) */
+  .auto-review-card{
+    background:var(--bg2); border:.5px solid var(--border); border-radius:12px;
+    border-left:2px solid var(--green);
+    padding:1.25rem 1.5rem; margin-bottom:10px;
+  }
+  .auto-review-grid{display:grid; grid-template-columns:1fr 1fr; gap:24px;}
+  @media(max-width:760px){.auto-review-grid{grid-template-columns:1fr;}}
+  .ar-title{
+    font-family:'DM Mono',monospace; font-size:11px; letter-spacing:.06em;
+    text-transform:uppercase; color:var(--gold); margin-bottom:10px;
+  }
+  .ar-bullets{list-style:none; padding:0; margin:0;}
+  .ar-bullets li{
+    display:flex; gap:10px; align-items:flex-start;
+    font-size:13px; color:var(--text); line-height:1.5;
+    padding:8px 0; border-bottom:.5px solid rgba(255,255,255,0.04);
+  }
+  .ar-bullets li:last-child{border-bottom:none;}
+  .ar-bullets .ar-icon{flex-shrink:0; font-size:14px; line-height:1.4;}
+  .ar-bullets .ar-text{color:var(--muted);}
+  .ar-bullets .ar-text strong{color:var(--text); font-weight:500;}
+  .ar-hint{
+    font-family:'DM Mono',monospace; font-size:11px; color:var(--muted);
+    margin-top:14px; padding-top:14px; border-top:.5px dashed rgba(255,255,255,0.05);
+    line-height:1.5;
+  }
+
   /* Claude review export */
   .review-card{
     background:var(--bg2); border:.5px solid var(--border); border-radius:12px;
@@ -195,8 +223,27 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
   <div class="sec-label">Заметки по символам · эмоции, оценка, урок</div>
   <div id="notesBox"></div>
 
-  <!-- BLOCK 6 (preview): export to Claude for full review -->
-  <div class="sec-label">Разбор недели</div>
+  <!-- BLOCK 6a: Auto-review (rule-based, deterministic) -->
+  <div class="sec-label">Алгоритмический разбор</div>
+  <div class="auto-review-card">
+    <div class="auto-review-grid">
+      <div>
+        <div class="ar-title">📖 Урок недели</div>
+        <ul class="ar-bullets" id="lessonBullets"></ul>
+      </div>
+      <div>
+        <div class="ar-title">🎯 План на следующую неделю</div>
+        <ul class="ar-bullets" id="planBullets"></ul>
+      </div>
+    </div>
+    <div class="ar-hint">
+      Сгенерировано из данных + правил Recommender. Бесплатно, мгновенно, детерминированно.
+      Хочешь разбор «как у Claude» с прозой и вопросами? — кнопка ниже.
+    </div>
+  </div>
+
+  <!-- BLOCK 6b: Export to Claude for full review -->
+  <div class="sec-label">Расширенный разбор от Claude</div>
   <div class="review-card">
     <div class="review-text">
       Соберу все данные этой недели + контекст последних 4 недель + твои заметки в один markdown-пейлоад
@@ -544,7 +591,40 @@ function renderWeekSelect(imports, currentId) {
   sel.onchange = () => loadWeek(sel.value);
 }
 
-// ---- BLOCK 6: Claude review payload --------------------------
+// ---- BLOCK 6a: rule-based auto-review ------------------------
+function renderAutoReview(payload) {
+  const lessonUl = document.getElementById('lessonBullets');
+  const planUl   = document.getElementById('planBullets');
+  const renderList = (ul, items) => {
+    if (!items || items.length === 0) {
+      ul.innerHTML = '<li><span class="ar-icon">·</span><span class="ar-text">Недостаточно данных для выводов.</span></li>';
+      return;
+    }
+    ul.innerHTML = items.map(b => {
+      // Convert **bold** markers to <strong> safely
+      const html = escapeHtml(b.text).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      return `<li><span class="ar-icon">${b.icon || '·'}</span><span class="ar-text">${html}</span></li>`;
+    }).join('');
+  };
+  renderList(lessonUl, payload.lesson_bullets || []);
+  renderList(planUl,   payload.plan_bullets   || []);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadAutoReview(importId) {
+  try {
+    const r = await api('auto_review', importId ? { import_id: importId } : {});
+    renderAutoReview(r);
+  } catch (e) {
+    document.getElementById('lessonBullets').innerHTML =
+      `<li><span class="ar-icon">✗</span><span class="ar-text">Ошибка: ${escapeHtml(e.message)}</span></li>`;
+  }
+}
+
+// ---- BLOCK 6b: Claude review payload --------------------------
 let lastWeekData = null;
 let allImports   = [];
 
@@ -707,6 +787,7 @@ async function loadWeek(importId) {
     renderPositions(week);
     renderRanks(week);
     renderNotes(week);
+    loadAutoReview(week.import.id);
     // Pre-fill the preview pane so user can see what'll be copied
     document.getElementById('reviewPreview').textContent = buildReviewPayload(week, list.imports);
   } catch (e) {
