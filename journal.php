@@ -54,6 +54,9 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
   .te-meta{color:var(--muted); font-size:12px; margin-top:4px; font-family:'DM Mono',monospace;}
   .te-body{color:var(--muted); font-size:13px; margin-top:8px; line-height:1.5;}
   .te-body.lesson{color:var(--amber); margin-top:4px;}
+  .te-pnl{font-family:'DM Mono',monospace; font-size:14px; font-weight:500; padding:3px 8px; border-radius:5px;}
+  .te-pnl.pos{color:var(--green); background:var(--green-dim);}
+  .te-pnl.neg{color:var(--red);   background:var(--red-dim);}
   .summary-bar{
     display:flex; flex-wrap:wrap; gap:18px; background:var(--bg2);
     border:.5px solid var(--border); border-radius:10px;
@@ -113,7 +116,13 @@ $apiKey = defined('API_KEY') ? API_KEY : '';
           <label>Сетап</label>
           <input type="text" id="j-setup" placeholder="пробой, откат к 20 EMA…">
         </div>
-        <div style="display:flex; gap:18px; align-items:center; padding-top:24px;">
+        <div>
+          <label>P&L ($) <span style="font-size:9px; color:rgba(255,255,255,0.3); text-transform:none; letter-spacing:0;">опционально, если нет IBKR-данных</span></label>
+          <input type="number" step="0.01" id="j-pnl" placeholder="+1600 или -800">
+        </div>
+      </div>
+      <div class="jrow">
+        <div style="display:flex; gap:18px; align-items:center;">
           <label style="display:flex; gap:8px; align-items:center; font-family:'DM Mono',monospace; font-size:11px; color:var(--green);">
             <input type="checkbox" id="j-good"> Хорошая сделка
           </label>
@@ -185,6 +194,7 @@ function clearForm() {
   document.getElementById('j-emo-before').value = '';
   document.getElementById('j-emo-after').value = '';
   document.getElementById('j-setup').value = '';
+  document.getElementById('j-pnl').value = '';
   document.getElementById('j-good').checked = false;
   document.getElementById('j-regret').checked = false;
   document.getElementById('j-free').value = '';
@@ -198,12 +208,14 @@ function cancelEdit() { clearForm(); }
 
 async function saveEntry() {
   const editId = document.getElementById('j-edit-id').value;
+  const pnlRaw = document.getElementById('j-pnl').value;
   const payload = {
     symbol         : document.getElementById('j-ticker').value.trim().toUpperCase(),
     note_date      : document.getElementById('j-date').value,
     emotion_before : document.getElementById('j-emo-before').value || null,
     emotion_after  : document.getElementById('j-emo-after').value || null,
     setup          : document.getElementById('j-setup').value || null,
+    manual_pnl     : pnlRaw === '' ? null : Number(pnlRaw),
     good_trade     : document.getElementById('j-good').checked ? 1 : 0,
     regret_flag    : document.getElementById('j-regret').checked ? 1 : 0,
     lesson         : document.getElementById('j-lesson').value || null,
@@ -237,6 +249,7 @@ function editEntry(id) {
   document.getElementById('j-emo-before').value= n.emotion_before || '';
   document.getElementById('j-emo-after').value = n.emotion_after  || '';
   document.getElementById('j-setup').value     = n.setup    || '';
+  document.getElementById('j-pnl').value       = n.manual_pnl != null ? n.manual_pnl : '';
   document.getElementById('j-good').checked    = n.good_trade == 1;
   document.getElementById('j-regret').checked  = n.regret_flag == 1;
   document.getElementById('j-free').value      = n.free_text || '';
@@ -277,6 +290,19 @@ function renderLog() {
     const importTag = n.period_start
       ? `<span class="te-tag" style="background:rgba(195,165,76,0.12);color:var(--gold);">привязано к ${n.period_start}…${n.period_end}</span>`
       : '<span class="te-tag" style="background:rgba(255,255,255,0.06);color:var(--muted);">без привязки</span>';
+
+    // P&L: prefer IBKR realized when linked, fall back to manual_pnl
+    let pnlHtml = '';
+    const pnlVal = n.ibkr_realized_pl != null ? Number(n.ibkr_realized_pl)
+                  : n.manual_pnl     != null ? Number(n.manual_pnl)
+                  : null;
+    if (pnlVal != null && !isNaN(pnlVal) && pnlVal !== 0) {
+      const sign = pnlVal >= 0 ? '+' : '';
+      const cls  = pnlVal >= 0 ? 'pos' : 'neg';
+      const src  = n.ibkr_realized_pl != null ? 'IBKR' : 'ручной';
+      pnlHtml = `<span class="te-pnl ${cls}" title="источник: ${src}">${sign}$${Math.round(pnlVal).toLocaleString('en-US')}</span>`;
+    }
+
     return `
       <div class="trade-entry">
         <div class="te-header">
@@ -286,7 +312,8 @@ function renderLog() {
             <span class="te-date">${n.note_date || '—'}</span>
             ${importTag}
           </div>
-          <div style="display:flex; gap:6px;">
+          <div style="display:flex; gap:8px; align-items:center;">
+            ${pnlHtml}
             <button class="btn sm secondary" onclick="editEntry(${n.id})">Изменить</button>
             <button class="btn sm danger" onclick="deleteEntry(${n.id})">✕</button>
           </div>
@@ -301,8 +328,16 @@ function renderLog() {
   const good   = notes.filter(n => n.good_trade == 1).length;
   const regret = notes.filter(n => n.regret_flag == 1).length;
   const linked = notes.filter(n => n.import_id).length;
+  const totalPnl = notes.reduce((acc, n) => {
+    const v = n.ibkr_realized_pl != null ? Number(n.ibkr_realized_pl)
+            : n.manual_pnl     != null ? Number(n.manual_pnl) : 0;
+    return acc + (isNaN(v) ? 0 : v);
+  }, 0);
+  const pnlSign = totalPnl >= 0 ? '+' : '';
+  const pnlColor= totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
   sum.style.display = 'flex';
   sum.innerHTML = `
+    <div class="sb-item"><span class="sb-val" style="color:${pnlColor}">${pnlSign}$${Math.round(totalPnl).toLocaleString('en-US')}</span><span class="sb-label">суммарный P&L</span></div>
     <div class="sb-item"><span class="sb-val">${total}</span><span class="sb-label">всего записей</span></div>
     <div class="sb-item"><span class="sb-val" style="color:var(--green)">${good}</span><span class="sb-label">хороших</span></div>
     <div class="sb-item"><span class="sb-val" style="color:var(--red)">${regret}</span><span class="sb-label">regret</span></div>
@@ -316,13 +351,20 @@ function escapeHtml(s) {
 
 function exportLog() {
   if (notes.length === 0) { alert('Нет записей'); return; }
-  const rows = [['Дата','Тикер','Эмоция до','Эмоция после','Setup','Good','Regret','Free text','Урок','Привязка']];
-  notes.forEach(n => rows.push([
-    n.note_date || '', n.symbol, n.emotion_before || '', n.emotion_after || '',
-    n.setup || '', n.good_trade == 1 ? 'yes':'', n.regret_flag == 1 ? 'yes':'',
-    n.free_text || '', n.lesson || '',
-    n.period_start ? `${n.period_start}…${n.period_end}` : ''
-  ]));
+  const rows = [['Дата','Тикер','P&L','Источник','Эмоция до','Эмоция после','Setup','Good','Regret','Free text','Урок','Привязка']];
+  notes.forEach(n => {
+    const pnl = n.ibkr_realized_pl != null ? n.ibkr_realized_pl
+              : n.manual_pnl     != null ? n.manual_pnl : '';
+    const src = n.ibkr_realized_pl != null ? 'IBKR'
+              : n.manual_pnl     != null ? 'manual' : '';
+    rows.push([
+      n.note_date || '', n.symbol, pnl, src,
+      n.emotion_before || '', n.emotion_after || '',
+      n.setup || '', n.good_trade == 1 ? 'yes':'', n.regret_flag == 1 ? 'yes':'',
+      n.free_text || '', n.lesson || '',
+      n.period_start ? `${n.period_start}…${n.period_end}` : ''
+    ]);
+  });
   const csv = rows.map(r => r.map(c => '"' + String(c).replace(/"/g,'""') + '"').join(',')).join('\n');
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv);

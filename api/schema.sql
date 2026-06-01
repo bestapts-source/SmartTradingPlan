@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS trade_notes (
     note_date       DATE DEFAULT NULL,
 
     setup           VARCHAR(100) DEFAULT NULL,
+    manual_pnl      DECIMAL(15,2) DEFAULT NULL,   -- shown only when no linked IBKR data
     emotion_before  ENUM('Calm','Confident','FOMO','Anxious','Greedy','Neutral') DEFAULT NULL,
     emotion_after   ENUM('Satisfied','Regret','Neutral','Proud','Frustrated') DEFAULT NULL,
     good_trade      TINYINT(1) DEFAULT NULL,

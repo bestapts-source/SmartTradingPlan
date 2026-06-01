@@ -95,6 +95,8 @@ foreach ($legacyRows as $row) {
     $emoBefore = $mapEmoBefore($row['Эмоции'] ?? null);
     $freeText  = trim((string)($row['Что произошло'] ?? ''));
     $lesson    = trim((string)($row['Урок'] ?? ''));
+    $pnlRaw    = $row['P&L'] ?? null;
+    $manualPnl = is_numeric($pnlRaw) ? (float)$pnlRaw : null;
 
     $importId = $findImport($noteDate);
 
@@ -126,12 +128,14 @@ foreach ($legacyRows as $row) {
     try {
         if ($existing) {
             // Merge: keep earliest note_date, append new free_text/lesson if
-            // different, OR-merge regret_flag, prefer non-null good_trade
+            // different, OR-merge regret_flag, prefer non-null good_trade.
+            // For manual_pnl we SUM (multiple Sheets rows = multiple realized trades).
             $upd = $pdo->prepare(
                 "UPDATE trade_notes
                     SET emotion_before = COALESCE(emotion_before, ?),
                         good_trade     = COALESCE(good_trade,     ?),
                         regret_flag    = GREATEST(regret_flag,    ?),
+                        manual_pnl     = COALESCE(manual_pnl, 0) + COALESCE(?, 0),
                         lesson = TRIM(BOTH '\n' FROM CONCAT_WS('\n',
                                     NULLIF(lesson, ''),
                                     CASE
@@ -153,6 +157,7 @@ foreach ($legacyRows as $row) {
             );
             $upd->execute([
                 $emoBefore, $goodTrade, $regretFlag,
+                $manualPnl,
                 $lesson, $lesson, $lesson,
                 $freeText, $freeText, $noteDate, $freeText,
                 $importId,
@@ -163,10 +168,10 @@ foreach ($legacyRows as $row) {
         } else {
             $ins = $pdo->prepare(
                 'INSERT INTO trade_notes
-                   (import_id, symbol, note_date, emotion_before, good_trade, regret_flag, lesson, free_text)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+                   (import_id, symbol, note_date, manual_pnl, emotion_before, good_trade, regret_flag, lesson, free_text)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
-            $ins->execute([$importId, $symbol, $noteDate, $emoBefore, $goodTrade, $regretFlag, $lesson, $freeText]);
+            $ins->execute([$importId, $symbol, $noteDate, $manualPnl, $emoBefore, $goodTrade, $regretFlag, $lesson, $freeText]);
             $results['inserted']++;
         }
     } catch (Throwable $e) {

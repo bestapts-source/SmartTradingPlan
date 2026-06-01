@@ -51,15 +51,24 @@ try {
 
         case 'notes':
             // GET all notes (for the journal page) — orphan + linked.
+            // JOIN with ibkr_symbol_summary so each linked note carries the
+            // IBKR-derived realized/total P&L for its symbol in that week.
             $rows = $pdo->query(
-                'SELECT n.id, n.import_id, n.symbol, n.note_date,
-                        n.setup, n.emotion_before, n.emotion_after,
+                "SELECT n.id, n.import_id, n.symbol, n.note_date,
+                        n.setup, n.manual_pnl,
+                        n.emotion_before, n.emotion_after,
                         n.good_trade, n.regret_flag, n.lesson, n.free_text,
                         n.created_at, n.updated_at,
-                        i.period_start, i.period_end
+                        i.period_start, i.period_end,
+                        s.realized_pl  AS ibkr_realized_pl,
+                        s.total_pl     AS ibkr_total_pl,
+                        s.unrealized_pl AS ibkr_unrealized_pl,
+                        /* effective_pnl = IBKR realized if linked, else manual */
+                        COALESCE(s.realized_pl, n.manual_pnl) AS effective_pnl
                  FROM trade_notes n
-                 LEFT JOIN ibkr_imports i ON i.id = n.import_id
-                 ORDER BY COALESCE(n.note_date, n.updated_at) DESC, n.id DESC'
+                 LEFT JOIN ibkr_imports i        ON i.id = n.import_id
+                 LEFT JOIN ibkr_symbol_summary s ON s.import_id = n.import_id AND s.symbol = n.symbol
+                 ORDER BY COALESCE(n.note_date, n.updated_at) DESC, n.id DESC"
             )->fetchAll();
             jsonResponse(['success' => true, 'notes' => $rows]);
             break;
@@ -256,6 +265,11 @@ function saveNote(PDO $pdo, array $input): array {
     $regret    = isset($input['regret_flag'])? (int)(bool)$input['regret_flag'] : 0;
     $lesson    = $input['lesson']    ?? null;
     $freeText  = $input['free_text'] ?? null;
+    // manual_pnl is only set when the caller explicitly passes a number.
+    // Empty string ⇒ null (clear). Missing key ⇒ leave whatever's in DB alone.
+    $manualPnl = array_key_exists('manual_pnl', $input)
+        ? (is_numeric($input['manual_pnl']) ? (float)$input['manual_pnl'] : null)
+        : '__keep__';
 
     // Auto-link to an import if note_date is inside its period and no import_id given.
     if ($importId === null && $noteDate !== null) {
@@ -276,35 +290,53 @@ function saveNote(PDO $pdo, array $input): array {
         $sel->execute([$symbol, $noteDate]);
         $existingId = $sel->fetchColumn();
         if ($existingId) {
-            $upd = $pdo->prepare(
-                'UPDATE trade_notes
-                    SET setup=?, emotion_before=?, emotion_after=?, good_trade=?, regret_flag=?, lesson=?, free_text=?,
-                        note_date=?
-                  WHERE id = ?'
-            );
-            $upd->execute([$setup, $emoBefore, $emoAfter, $goodTrade, $regret, $lesson, $freeText, $noteDate, $existingId]);
+            if ($manualPnl === '__keep__') {
+                $upd = $pdo->prepare(
+                    'UPDATE trade_notes
+                        SET setup=?, emotion_before=?, emotion_after=?, good_trade=?, regret_flag=?, lesson=?, free_text=?,
+                            note_date=?
+                      WHERE id = ?'
+                );
+                $upd->execute([$setup, $emoBefore, $emoAfter, $goodTrade, $regret, $lesson, $freeText, $noteDate, $existingId]);
+            } else {
+                $upd = $pdo->prepare(
+                    'UPDATE trade_notes
+                        SET setup=?, manual_pnl=?, emotion_before=?, emotion_after=?, good_trade=?, regret_flag=?, lesson=?, free_text=?,
+                            note_date=?
+                      WHERE id = ?'
+                );
+                $upd->execute([$setup, $manualPnl, $emoBefore, $emoAfter, $goodTrade, $regret, $lesson, $freeText, $noteDate, $existingId]);
+            }
             return ['id' => (int)$existingId, 'mode' => 'updated'];
         }
+        $insManual = $manualPnl === '__keep__' ? null : $manualPnl;
         $ins = $pdo->prepare(
             'INSERT INTO trade_notes
-                (import_id, symbol, note_date, setup, emotion_before, emotion_after,
+                (import_id, symbol, note_date, setup, manual_pnl, emotion_before, emotion_after,
                  good_trade, regret_flag, lesson, free_text)
-             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+             VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $ins->execute([$symbol, $noteDate, $setup, $emoBefore, $emoAfter, $goodTrade, $regret, $lesson, $freeText]);
+        $ins->execute([$symbol, $noteDate, $setup, $insManual, $emoBefore, $emoAfter, $goodTrade, $regret, $lesson, $freeText]);
         return ['id' => (int)$pdo->lastInsertId(), 'mode' => 'inserted'];
     }
 
-    // import_id present → UNIQUE(import_id, symbol) lets us upsert
+    // import_id present → UNIQUE(import_id, symbol) lets us upsert.
+    // If caller didn't pass manual_pnl, preserve whatever's already in DB.
+    $manualPnlSql   = $manualPnl === '__keep__'
+        ? 'manual_pnl = manual_pnl'
+        : 'manual_pnl = VALUES(manual_pnl)';
+    $insertManual   = $manualPnl === '__keep__' ? null : $manualPnl;
+
     $sql = "INSERT INTO trade_notes
-               (import_id, symbol, note_date, setup, emotion_before, emotion_after,
+               (import_id, symbol, note_date, setup, manual_pnl, emotion_before, emotion_after,
                 good_trade, regret_flag, lesson, free_text)
             VALUES
-               (:import_id, :symbol, :note_date, :setup, :emotion_before, :emotion_after,
+               (:import_id, :symbol, :note_date, :setup, :manual_pnl, :emotion_before, :emotion_after,
                 :good_trade, :regret_flag, :lesson, :free_text)
             ON DUPLICATE KEY UPDATE
                note_date     = VALUES(note_date),
                setup         = VALUES(setup),
+               $manualPnlSql,
                emotion_before= VALUES(emotion_before),
                emotion_after = VALUES(emotion_after),
                good_trade    = VALUES(good_trade),
@@ -317,6 +349,7 @@ function saveNote(PDO $pdo, array $input): array {
         ':symbol'         => $symbol,
         ':note_date'      => $noteDate,
         ':setup'          => $setup,
+        ':manual_pnl'     => $insertManual,
         ':emotion_before' => $emoBefore,
         ':emotion_after'  => $emoAfter,
         ':good_trade'     => $goodTrade,
