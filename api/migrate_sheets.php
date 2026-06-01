@@ -98,38 +98,67 @@ foreach ($legacyRows as $row) {
 
     $importId = $findImport($noteDate);
 
-    // Is there already a note for this (symbol, note_date)?
+    // Look up an existing note for this (import_id, symbol). The UNIQUE key
+    // is (import_id, symbol) — i.e. one note per symbol per week. Multiple
+    // legacy entries for the same symbol-week get MERGED (free_text appended)
+    // rather than dropped.
     $sel = $pdo->prepare(
         'SELECT id FROM trade_notes
           WHERE symbol = ?
-            AND note_date = ?
             AND ( (import_id IS NULL AND ? IS NULL) OR import_id <=> ? )
           LIMIT 1'
     );
-    $sel->execute([$symbol, $noteDate, $importId, $importId]);
+    $sel->execute([$symbol, $importId, $importId]);
     $existing = $sel->fetchColumn();
 
     if ($dryRun) {
-        $results['errors'][] = [
-            'symbol' => $symbol, 'date' => $noteDate, 'import_id' => $importId,
-            'would' => $existing ? 'UPDATE' : 'INSERT',
+        $results['samples'][] = [
+            'symbol'    => $symbol,
+            'date'      => $noteDate,
+            'import_id' => $importId,
+            'would'     => $existing ? 'MERGE' : 'INSERT',
+            'free_text' => mb_substr($freeText, 0, 40),
         ];
+        if ($existing) $results['updated']++; else $results['inserted']++;
         continue;
     }
 
     try {
         if ($existing) {
+            // Merge: keep earliest note_date, append new free_text/lesson if
+            // different, OR-merge regret_flag, prefer non-null good_trade
             $upd = $pdo->prepare(
-                'UPDATE trade_notes
+                "UPDATE trade_notes
                     SET emotion_before = COALESCE(emotion_before, ?),
                         good_trade     = COALESCE(good_trade,     ?),
                         regret_flag    = GREATEST(regret_flag,    ?),
-                        lesson         = COALESCE(NULLIF(lesson, ""), ?),
-                        free_text      = COALESCE(NULLIF(free_text, ""), ?),
-                        import_id      = COALESCE(import_id, ?)
-                  WHERE id = ?'
+                        lesson = TRIM(BOTH '\n' FROM CONCAT_WS('\n',
+                                    NULLIF(lesson, ''),
+                                    CASE
+                                      WHEN ? = '' THEN NULL
+                                      WHEN lesson IS NULL OR INSTR(lesson, ?) = 0 THEN ?
+                                      ELSE NULL
+                                    END)),
+                        free_text = TRIM(BOTH '\n' FROM CONCAT_WS('\n',
+                                    NULLIF(free_text, ''),
+                                    CASE
+                                      WHEN ? = '' THEN NULL
+                                      WHEN free_text IS NULL OR INSTR(free_text, ?) = 0 THEN
+                                        CONCAT('[', ?, '] ', ?)
+                                      ELSE NULL
+                                    END)),
+                        import_id      = COALESCE(import_id, ?),
+                        note_date      = LEAST(COALESCE(note_date, ?), ?)
+                  WHERE id = ?"
             );
-            $upd->execute([$emoBefore, $goodTrade, $regretFlag, $lesson, $freeText, $importId, $existing]);
+            $upd->execute([
+                $emoBefore, $goodTrade, $regretFlag,
+                $lesson, $lesson, $lesson,
+                $freeText, $freeText, $noteDate, $freeText,
+                $importId,
+                $noteDate, $noteDate,
+                $existing,
+            ]);
             $results['updated']++;
         } else {
             $ins = $pdo->prepare(
@@ -146,6 +175,16 @@ foreach ($legacyRows as $row) {
             'error' => $e->getMessage(),
         ];
     }
+}
+
+// Trim long arrays before returning
+if (count($results['errors']) > 10) {
+    $results['errors_truncated'] = count($results['errors']);
+    $results['errors'] = array_slice($results['errors'], 0, 10);
+}
+if (!empty($results['samples']) && count($results['samples']) > 20) {
+    $results['samples_truncated'] = count($results['samples']);
+    $results['samples'] = array_slice($results['samples'], 0, 20);
 }
 
 jsonResponse(['success' => true, 'dry_run' => $dryRun] + $results);
