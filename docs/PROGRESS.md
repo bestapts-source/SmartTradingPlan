@@ -5,6 +5,78 @@ go at the top.
 
 ---
 
+## Phase 4 — Notes + journal migration · ✅ DONE (2026-06-01)
+
+**Built**
+
+- `api/analytics.php` extended:
+  - `GET ?action=notes` — all rows from `trade_notes` joined with their
+    import meta, ordered by `note_date` DESC
+  - `POST ?action=save_note` — upsert by `(import_id, symbol)`. Body accepts
+    JSON or POST form. `import_id` auto-resolves from `note_date` if a
+    matching `ibkr_imports` row exists for that period; orphan notes
+    (no import_id) go through a manual `SELECT` check to dedupe by
+    `(symbol, note_date)`.
+  - `POST ?action=delete_note` by id
+- `analytics.php` (page) — new **Block 5**: per-symbol notes card grid.
+  Each tradable symbol of the week renders a card with:
+  emotion-before / emotion-after `<select>`s, Хорошая / Regret checkboxes,
+  Урок + Заметка textareas. Auto-saves on change (250ms debounce) with a
+  transient `сохранено ✓` flag. No "save" button.
+- `journal.php` — replaces `journal.html`. Same UI shell, new data layer.
+  Fields: ticker, date, emotion_before, emotion_after, setup, good/regret
+  flags, free_text, lesson. Edit + delete + CSV export preserved. Each
+  entry's row shows a tag for the linked IBKR week or "без привязки".
+- `api/migrate_sheets.php` — one-shot importer from the legacy Google
+  Sheets journal at `script.google.com/.../AKfyc...`. Mapping:
+  - `Эмоции` 0-10 → enum (`0-3 Calm`, `4-6 Neutral`, `7-10 FOMO`)
+  - `Действие` close-win → `good_trade=1`; close-loss → `regret_flag=1`
+  - `Что произошло` → `free_text`; `Урок` → `lesson`
+  - Auto-links `import_id` when the date falls inside a known IBKR week.
+  - **Idempotent**: matches by `(import_id, symbol)`. On duplicate,
+    MERGES: appends new free_text with `[YYYY-MM-DD] ` prefix, OR-combines
+    regret_flag, takes the earliest note_date, prefers non-null
+    emotion_before / good_trade.
+  - `?dry=1` returns a preview without writing.
+- `nav.js` — Дневник link now points to `journal.php`.
+
+**Verified**
+
+| Check | Result |
+|---|---|
+| `save_note` upsert (JSON POST, then change emotion, re-POST) | row updated in place ✓ |
+| `notes` endpoint returns linked + orphan notes | ✓ |
+| Cyrillic UTF-8 round-trip via PHP + PDO + MySQL utf8mb4 | bytes `D0 9D D0 B5 …` = "Не …" ✓ |
+| Migration of 40 legacy entries from Google Sheets | 20 inserted + 20 merged-updated, 0 errors |
+| 16 of 20 final notes linked to an `ibkr_imports` row | by `note_date` falling inside `period_start..period_end` |
+| IREN had 6 raw entries → 1 merged note | timeline of all 6 reconstructed in `free_text` |
+| HTTP for `journal.html` after rename | 404 ✓ |
+| HTTP for `journal.php`                | 200 ✓ |
+
+**Bug fixed mid-phase**
+
+`api/config.local.php` on the server had:
+```php
+define('AUTH_PASSWORD_HASH', "$2y$10$LNDVWC9QASwgexyo35gcO...");
+```
+Double quotes made PHP interpolate `$LNDVWC9QASwgexyo35gcO` as an undefined
+variable, corrupting the bcrypt hash. Phase 5 login would have silently
+failed. Fixed to single quotes (server-only file; CLAUDE.local.md updated).
+
+**Decisions**
+
+- Notes granularity stayed at `(import_id, symbol)` per the brainstorm.
+  Multiple journal entries on the same symbol within the same week are
+  merged with timestamped sections instead of being dropped.
+- Auto-save runs on `change` for selects/checkboxes (immediate) and `blur`
+  for textareas (avoids spamming the API while typing).
+- For Phase 5 we'll need a CSRF check on the POST endpoints once we add
+  PHP session auth. The current `hash_equals(API_KEY, …)` is fine for an
+  API-key-only world but a logged-in user shouldn't have to embed the
+  key in JS.
+
+---
+
 ## Phase 3 — Analytics API + read-only dashboard · ✅ DONE (2026-05-31)
 
 **Built**

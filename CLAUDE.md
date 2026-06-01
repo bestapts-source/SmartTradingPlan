@@ -105,7 +105,7 @@ also documented in `CLAUDE.local.md` (gitignored).
 | 1 | ✅ | DB schema + minimal import (NAV + cash) |
 | 2 | ✅ | Full IBKR parser (trades / positions / symbol summary) |
 | 3 | ✅ | Analytics API + dashboard blocks 1-4 + 7 (upload) |
-| 4 | ⏳ next | Trade notes (Block 5) + migrate `journal.html` → MySQL |
-| 5 | ⏳ | Continuation Plan (Block 6) + PHP session login + polish |
+| 4 | ✅ | Trade notes (Block 5) + journal.html → journal.php on MySQL + sheets migration |
+| 5 | ⏳ next | Continuation Plan (Block 6) + PHP session login + polish |
 
 See `docs/PROGRESS.md` for the full changelog with verified numbers.
