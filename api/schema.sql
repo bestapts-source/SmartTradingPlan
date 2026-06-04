@@ -187,4 +187,30 @@ CREATE TABLE IF NOT EXISTS weekly_reviews (
         REFERENCES ibkr_imports(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ------------------------------------------------------------
+-- 7. calc_history — saved position-size calculations
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS calc_history (
+    id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    note_date    DATE NOT NULL,
+    symbol       VARCHAR(64) NOT NULL,
+    entry        DECIMAL(15,4),
+    stop_price   DECIMAL(15,4),
+    stop_diff    DECIMAL(15,4),
+    target       DECIMAL(15,4) DEFAULT NULL,
+    lot          INT UNSIGNED,
+    risk_usd     DECIMAL(15,2),
+    rr2_target   DECIMAL(15,4),
+    rr3_target   DECIMAL(15,4),
+    profit_2r    DECIMAL(15,2),
+    profit_3r    DECIMAL(15,2),
+    capital      DECIMAL(15,2),
+    risk_pct     DECIMAL(8,4),
+    notes        TEXT,
+    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_calc_symbol (symbol),
+    KEY idx_calc_date (note_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET FOREIGN_KEY_CHECKS = 1;

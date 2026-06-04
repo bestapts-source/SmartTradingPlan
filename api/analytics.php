@@ -56,6 +56,62 @@ try {
             jsonResponse(['success' => true] + Reviewer::analyze($pdo, $id));
             break;
 
+        case 'evaluate_setup':
+            // POST/GET — checks an intended trade against the 6 rules.
+            // Inputs: symbol, entry, stop, target, capital (?), risk_pct (?)
+            $i = readJsonOrForm() + $_GET;
+            jsonResponse(['success' => true] + evaluateSetup($pdo, $i));
+            break;
+
+        case 'list_calcs':
+            $rows = $pdo->query(
+                'SELECT id, note_date, symbol, entry, stop_price, stop_diff, target, lot,
+                        risk_usd, rr2_target, rr3_target, profit_2r, profit_3r,
+                        capital, risk_pct, notes, created_at
+                 FROM calc_history ORDER BY created_at DESC, id DESC'
+            )->fetchAll();
+            jsonResponse(['success' => true, 'calcs' => $rows]);
+            break;
+
+        case 'save_calc':
+            if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') jsonError('POST only', 405);
+            $i = readJsonOrForm();
+            $ins = $pdo->prepare(
+                'INSERT INTO calc_history
+                   (note_date, symbol, entry, stop_price, stop_diff, target, lot, risk_usd,
+                    rr2_target, rr3_target, profit_2r, profit_3r, capital, risk_pct, notes)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+            );
+            $ins->execute([
+                $i['note_date']  ?? date('Y-m-d'),
+                strtoupper(trim((string)($i['symbol'] ?? ''))) ?: '—',
+                $i['entry']      ?? null,
+                $i['stop_price'] ?? null,
+                $i['stop_diff']  ?? null,
+                $i['target']     ?? null,
+                $i['lot']        ?? null,
+                $i['risk_usd']   ?? null,
+                $i['rr2_target'] ?? null,
+                $i['rr3_target'] ?? null,
+                $i['profit_2r']  ?? null,
+                $i['profit_3r']  ?? null,
+                $i['capital']    ?? null,
+                $i['risk_pct']   ?? null,
+                $i['notes']      ?? null,
+            ]);
+            jsonResponse(['success' => true, 'id' => (int)$pdo->lastInsertId()]);
+            break;
+
+        case 'delete_calc':
+            if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') jsonError('POST only', 405);
+            $i = readJsonOrForm();
+            $id = (int)($i['id'] ?? 0);
+            if ($id <= 0) jsonError('id required', 400);
+            $st = $pdo->prepare('DELETE FROM calc_history WHERE id = ?');
+            $st->execute([$id]);
+            jsonResponse(['success' => true, 'deleted' => $st->rowCount()]);
+            break;
+
         case 'notes':
             // GET all notes (for the journal page) — orphan + linked.
             // JOIN with ibkr_symbol_summary so each linked note carries the
@@ -371,6 +427,177 @@ function saveNote(PDO $pdo, array $input): array {
         $newId = (int)$sel->fetchColumn();
     }
     return ['id' => $newId, 'mode' => $stmt->rowCount() === 1 ? 'inserted' : 'updated'];
+}
+
+// ============================================================
+// 6-rule pre-trade evaluator (no external data, no tokens)
+//
+// Returns per-rule {status: 'ok'|'fail'|'warn'|'manual', reason: '…'}
+// + overall verdict.
+// ============================================================
+function evaluateSetup(PDO $pdo, array $i): array {
+    $symbol = strtoupper(trim((string)($i['symbol'] ?? '')));
+    $entry  = isset($i['entry'])  && $i['entry']  !== '' ? (float)$i['entry']  : null;
+    $stop   = isset($i['stop'])   && $i['stop']   !== '' ? (float)$i['stop']   : null;
+    $target = isset($i['target']) && $i['target'] !== '' ? (float)$i['target'] : null;
+
+    $rules = [];
+
+    // ---- Rule 1: Volume 1.5× — needs external price data ----------
+    $rules[] = [
+        'n' => 1,
+        'title' => 'Объём выше 1.5× от 20-дневного среднего',
+        'status' => 'manual',
+        'reason' => 'Нужны рыночные данные. Глянь на TradingView / Finviz.',
+    ];
+
+    // ---- Rule 2: above 20 EMA — external ----------
+    $rules[] = [
+        'n' => 2,
+        'title' => 'Акция выше 20 EMA на дневном графике',
+        'status' => 'manual',
+        'reason' => 'Нужен график. Проверь на TradingView.',
+    ];
+
+    // ---- Rule 3: stop reasonableness — heuristic from inputs ----------
+    if ($entry !== null && $stop !== null && $stop > 0 && $entry > $stop) {
+        $stopPct = ($entry - $stop) / $entry * 100;
+        if ($stopPct < 1) {
+            $rules[] = ['n'=>3,'title'=>'Стоп от чёткого уровня поддержки',
+                'status'=>'warn',
+                'reason'=>sprintf('Стоп очень близко (%.2f%%) — может быть на шуме. Убедись, что под уровнем.', $stopPct)];
+        } elseif ($stopPct <= 5) {
+            $rules[] = ['n'=>3,'title'=>'Стоп от чёткого уровня поддержки',
+                'status'=>'ok',
+                'reason'=>sprintf('Стоп на %.2f%% — в норме для swing.', $stopPct)];
+        } elseif ($stopPct <= 8) {
+            $rules[] = ['n'=>3,'title'=>'Стоп от чёткого уровня поддержки',
+                'status'=>'warn',
+                'reason'=>sprintf('Стоп %.2f%% — широкий. Убедись что под значимым уровнем, не просто round number.', $stopPct)];
+        } else {
+            $rules[] = ['n'=>3,'title'=>'Стоп от чёткого уровня поддержки',
+                'status'=>'fail',
+                'reason'=>sprintf('Стоп %.2f%% — слишком далеко. Это не управление риском, это надежда.', $stopPct)];
+        }
+    } else {
+        $rules[] = ['n'=>3,'title'=>'Стоп от чёткого уровня поддержки',
+            'status'=>'manual','reason'=>'Введи вход и стоп для оценки.'];
+    }
+
+    // ---- Rule 4: R:R >= 2 — fully computable ----------
+    if ($entry !== null && $stop !== null && $target !== null && $entry > $stop) {
+        $rr = ($target - $entry) / ($entry - $stop);
+        if ($rr >= 2) {
+            $rules[] = ['n'=>4,'title'=>'Цель минимум 2× риска',
+                'status'=>'ok','reason'=>sprintf('R:R = %.2f — соответствует.', $rr)];
+        } else {
+            $rules[] = ['n'=>4,'title'=>'Цель минимум 2× риска',
+                'status'=>'fail','reason'=>sprintf('R:R = %.2f — ниже 2R, вход запрещён.', $rr)];
+        }
+    } elseif ($entry !== null && $stop !== null && $entry > $stop) {
+        $rr2target = $entry + 2 * ($entry - $stop);
+        $rules[] = ['n'=>4,'title'=>'Цель минимум 2× риска',
+            'status'=>'manual',
+            'reason'=>sprintf('Цель не задана. Минимальная цель 2R = $%.2f.', $rr2target)];
+    } else {
+        $rules[] = ['n'=>4,'title'=>'Цель минимум 2× риска',
+            'status'=>'manual','reason'=>'Введи вход и стоп.'];
+    }
+
+    // ---- Rule 5: no earnings in 3 days — external ----------
+    $rules[] = [
+        'n' => 5,
+        'title' => 'Нет отчётности в ближайшие 3 дня',
+        'status' => 'manual',
+        'reason' => 'Проверь календарь отчётов (earningswhispers.com или Finviz).',
+    ];
+
+    // ---- Rule 6: NOT in blacklist — from our DB ----------
+    if ($symbol === '') {
+        $rules[] = ['n'=>6,'title'=>'Инструмент НЕ в чёрном списке',
+            'status'=>'manual','reason'=>'Введи тикер для проверки.'];
+    } else {
+        // Hard-coded permanent blacklist (from index.html / journal context)
+        $permanentBlacklist = ['ASTS','CRWV','HUBS','ORCL','IREN'];
+
+        // History from DB:
+        // - regret_flag count across all imports
+        // - YTD performance (worst from any import for this symbol)
+        $st = $pdo->prepare(
+            'SELECT COUNT(*) AS regret_count FROM trade_notes WHERE symbol = ? AND regret_flag = 1'
+        );
+        $st->execute([$symbol]);
+        $regretCount = (int)$st->fetchColumn();
+
+        $st = $pdo->prepare(
+            "SELECT MIN(ytd_pl) AS worst_ytd, MIN(realized_pl) AS worst_week
+             FROM ibkr_symbol_summary
+             WHERE symbol = ?"
+        );
+        $st->execute([$symbol]);
+        $perfRow = $st->fetch();
+        $worstYtd  = $perfRow['worst_ytd']  !== null ? (float)$perfRow['worst_ytd']  : null;
+        $worstWeek = $perfRow['worst_week'] !== null ? (float)$perfRow['worst_week'] : null;
+
+        $issues = [];
+        if (in_array($symbol, $permanentBlacklist, true)) {
+            $issues[] = "в постоянном чёрном списке (из правил)";
+        }
+        if ($regretCount >= 3) {
+            $issues[] = "regret-флаг в {$regretCount} неделях";
+        }
+        if ($worstYtd !== null && $worstYtd < -3000) {
+            $issues[] = sprintf('YTD просадка %s', number_format($worstYtd, 0));
+        }
+        if ($worstWeek !== null && $worstWeek < -1000) {
+            $issues[] = sprintf('одна из недель: realized %s', number_format($worstWeek, 0));
+        }
+
+        if (!empty($issues)) {
+            $rules[] = ['n'=>6,'title'=>'Инструмент НЕ в чёрном списке',
+                'status'=>'fail',
+                'reason'=>$symbol.': '.implode('; ', $issues).'. 60 дней пауза.'];
+        } else {
+            // Positive history?
+            $st = $pdo->prepare(
+                "SELECT MAX(ytd_pl) AS best_ytd FROM ibkr_symbol_summary WHERE symbol = ?"
+            );
+            $st->execute([$symbol]);
+            $bestYtd = $st->fetchColumn();
+            if ($bestYtd !== null && (float)$bestYtd > 0) {
+                $rules[] = ['n'=>6,'title'=>'Инструмент НЕ в чёрном списке',
+                    'status'=>'ok',
+                    'reason'=>sprintf('%s: чист. YTD до +%s. Можно торговать.', $symbol, number_format((float)$bestYtd, 0))];
+            } else {
+                $rules[] = ['n'=>6,'title'=>'Инструмент НЕ в чёрном списке',
+                    'status'=>'ok',
+                    'reason'=>sprintf('%s: нет негативной истории в данных.', $symbol)];
+            }
+        }
+    }
+
+    // ---- Verdict ----
+    $fails  = count(array_filter($rules, fn($r) => $r['status'] === 'fail'));
+    $warns  = count(array_filter($rules, fn($r) => $r['status'] === 'warn'));
+    $manual = count(array_filter($rules, fn($r) => $r['status'] === 'manual'));
+    $oks    = count(array_filter($rules, fn($r) => $r['status'] === 'ok'));
+
+    if ($fails > 0) {
+        $verdict = ['code' => 'NO', 'label' => 'ВХОД ЗАПРЕЩЁН', 'reason' => "$fails правил нарушено"];
+    } elseif ($warns > 0) {
+        $verdict = ['code' => 'CAUTION', 'label' => 'ОСТОРОЖНО', 'reason' => "$warns предупреждений, $manual проверь вручную"];
+    } elseif ($manual > 0) {
+        $verdict = ['code' => 'CHECK', 'label' => 'ПРОВЕРЬ ВРУЧНУЮ', 'reason' => "$oks авто-OK, $manual ручных проверок"];
+    } else {
+        $verdict = ['code' => 'OK', 'label' => 'ВХОД РАЗРЕШЁН', 'reason' => "все 6 правил пройдены"];
+    }
+
+    return [
+        'symbol'  => $symbol,
+        'verdict' => $verdict,
+        'rules'   => $rules,
+        'counts'  => ['ok'=>$oks,'fail'=>$fails,'warn'=>$warns,'manual'=>$manual],
+    ];
 }
 
 function buildContinuation(PDO $pdo, int $id): array {

@@ -1,3 +1,8 @@
+<?php
+define('TRADING_BOOT', true);
+require __DIR__ . '/api/config.php';
+$apiKey = defined('API_KEY') ? API_KEY : '';
+?>
 <!DOCTYPE html>
 <!-- МОДУЛЬ: Калькулятор · Редактировать ТОЛЬКО этот файл -->
 <html lang="ru">
@@ -5,7 +10,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Калькулятор · Vadim Shteiman</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=<?= filemtime(__DIR__ . '/style.css') ?>">
 <style>
 .quick-row{display:grid;grid-template-columns:90px 110px 110px 110px;gap:8px;align-items:end;margin-bottom:12px;}
 @media(max-width:600px){.quick-row{grid-template-columns:1fr 1fr;}}
@@ -15,7 +20,6 @@
 .quick-row input::placeholder{font-size:12px;font-weight:400;}
 
 .calc-result{border-radius:10px;padding:1.25rem 1.5rem;margin-top:14px;font-family:'DM Mono',monospace;font-size:13px;line-height:2.2;display:none;}
-.calc-result.hint {background:var(--blue-dim);border:.5px solid rgba(91,163,245,0.2);color:var(--blue);}
 .calc-result.ready{background:var(--green-dim);border:.5px solid rgba(61,214,140,0.2);color:var(--green);}
 .calc-result strong{color:var(--text);}
 .calc-result .big{font-size:24px;font-weight:500;}
@@ -24,6 +28,37 @@
 
 .calc-reset{background:none;border:none;color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;cursor:pointer;padding:0;margin-left:12px;text-decoration:underline;text-underline-offset:2px;}
 .calc-reset:hover{color:var(--text);}
+
+/* 6 правил — встроенный pre-trade чеклист */
+.rules-card{
+  margin-top:16px; padding:16px 18px;
+  background:var(--bg2); border:.5px solid var(--border); border-radius:10px;
+}
+.rules-verdict{
+  display:flex; justify-content:space-between; align-items:center;
+  padding:8px 14px; border-radius:8px;
+  font-family:'DM Mono',monospace; font-size:13px; font-weight:500;
+  margin-bottom:14px;
+}
+.rules-verdict.ok      {background:var(--green-dim); color:var(--green);}
+.rules-verdict.caution {background:var(--amber-dim); color:var(--amber);}
+.rules-verdict.check   {background:var(--blue-dim);  color:var(--blue);}
+.rules-verdict.no      {background:var(--red-dim);   color:var(--red);}
+.rules-verdict-counts{font-size:11px; opacity:.8; font-weight:400;}
+.rules-list{list-style:none; padding:0; margin:0;}
+.rules-list li{
+  display:flex; gap:10px; align-items:flex-start;
+  padding:8px 0; border-bottom:.5px solid rgba(255,255,255,0.04);
+  font-size:12px;
+}
+.rules-list li:last-child{border-bottom:none;}
+.rule-icon{flex-shrink:0; width:22px; font-family:'DM Mono',monospace;}
+.rule-icon.ok    {color:var(--green);}
+.rule-icon.fail  {color:var(--red);}
+.rule-icon.warn  {color:var(--amber);}
+.rule-icon.manual{color:var(--muted);}
+.rule-title{color:var(--text); font-weight:500; font-family:'DM Mono',monospace; font-size:11px; letter-spacing:.04em; text-transform:uppercase;}
+.rule-reason{color:var(--muted); font-size:12px; margin-top:2px; line-height:1.5;}
 
 /* История */
 #calcLog{margin-top:12px;display:flex;flex-direction:column;gap:8px;}
@@ -34,6 +69,12 @@
 .calc-nums .g{color:var(--green);}
 .calc-nums .r{color:var(--red);}
 .api-status{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-left:auto;}
+
+.btn{background:var(--gold);color:#0e0f0d;border:none;border-radius:8px;padding:9px 18px;font-family:'DM Mono',monospace;font-size:12px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;}
+.btn:hover{filter:brightness(1.1);}
+.btn.sm{padding:6px 12px;font-size:10px;}
+.btn.secondary{background:var(--bg3);color:var(--text);border:.5px solid var(--border);}
+.btn.danger{background:transparent;color:var(--red);border:.5px solid var(--red);}
 </style>
 </head>
 <body data-page="calc">
@@ -83,12 +124,18 @@
       </div>
 
       <div id="calc-result" class="calc-result"></div>
+
+      <!-- 6-rule pre-trade check -->
+      <div id="rules-card" class="rules-card" style="display:none;">
+        <div id="rules-verdict" class="rules-verdict"></div>
+        <ul id="rules-list" class="rules-list"></ul>
+      </div>
     </div>
   </div>
 
   <div class="sec-label">
     История расчётов
-    <span class="api-status" id="api-status">Загружаю...</span>
+    <span class="api-status" id="api-status">Загружаю…</span>
   </div>
   <div id="calcLog"></div>
 
@@ -101,22 +148,28 @@
   </div>
 </main>
 
-<script src="nav.js"></script>
+<script src="nav.js?v=<?= filemtime(__DIR__ . '/nav.js') ?>"></script>
 <script>
-const API = 'https://script.google.com/macros/s/AKfycbzjHFJsyxSCviQOeMsYIA6uoKGh646haYuEFGhfb-0FG0g1PSyN4AeTTgR8eVX3ffY/exec';
+const API_KEY  = <?= json_encode($apiKey) ?>;
+const API_BASE = 'api/analytics.php';
 let calcs = [];
 let lastCalc = null;
+let evaluateDebounce = null;
 
 function setStatus(msg, color) {
   const el = document.getElementById('api-status');
   if (el) { el.textContent = msg; el.style.color = color || 'var(--muted)'; }
 }
 
-async function apiCall(params) {
-  const url = API + '?' + new URLSearchParams(params).toString();
-  const isWrite = params.action !== 'read';
-  const res = await fetch(url, isWrite ? { method: 'POST', redirect: 'follow' } : {});
-  return res.json();
+async function api(action, body) {
+  const url = `${API_BASE}?action=${action}&api_key=${encodeURIComponent(API_KEY)}`;
+  const opts = body
+    ? { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }
+    : { method:'GET' };
+  const r = await fetch(url, opts);
+  const j = await r.json();
+  if (!j.success) throw new Error(j.error || 'API error');
+  return j;
 }
 
 function tabNext(e, nextId) {
@@ -136,6 +189,10 @@ function calcPos() {
   const ticker  = (document.getElementById('c-ticker').value || '').toUpperCase();
   const el      = document.getElementById('calc-result');
   const saveBtn = document.getElementById('save-btn');
+  const rulesCard = document.getElementById('rules-card');
+
+  // Trigger rules evaluation (debounced) — runs even with partial inputs
+  scheduleRulesEval(ticker, entry, stop, target);
 
   if (!entry || !stop || entry <= stop) {
     el.style.display = 'none';
@@ -175,65 +232,119 @@ function calcPos() {
 
   saveBtn.style.display = '';
   lastCalc = {
-    'Дата':      new Date().toISOString().split('T')[0],
-    'Тикер':     ticker || '—',
-    'Вход':      entry,
-    'Стоп $':    diff.toFixed(2),
-    'Стоп цена': stop,
-    'Лот':       lot,
-    'Риск $':    actualRisk.toFixed(0),
-    'ТП 2R':     rr2.toFixed(2),
-    'Профит 2R': profit2.toFixed(0),
-    'ТП 3R':     rr3.toFixed(2),
-    'Профит 3R': profit3.toFixed(0),
-    'Капитал':   capital,
-    '% риска':   riskPct,
-    'ID':        String(Date.now()),
+    note_date  : new Date().toISOString().split('T')[0],
+    symbol     : ticker || '—',
+    entry      : entry,
+    stop_price : stop,
+    stop_diff  : Number(diff.toFixed(4)),
+    target     : target || null,
+    lot        : lot,
+    risk_usd   : Number(actualRisk.toFixed(2)),
+    rr2_target : Number(rr2.toFixed(4)),
+    rr3_target : Number(rr3.toFixed(4)),
+    profit_2r  : Number(profit2.toFixed(2)),
+    profit_3r  : Number(profit3.toFixed(2)),
+    capital    : capital,
+    risk_pct   : riskPct,
   };
+}
+
+// ---- 6 Rules check (server-side, debounced) ----
+function scheduleRulesEval(ticker, entry, stop, target) {
+  clearTimeout(evaluateDebounce);
+  // Need at least a ticker OR (entry+stop) to be useful
+  if (!ticker && (!entry || !stop)) {
+    document.getElementById('rules-card').style.display = 'none';
+    return;
+  }
+  evaluateDebounce = setTimeout(() => evaluateRules(ticker, entry, stop, target), 350);
+}
+
+async function evaluateRules(ticker, entry, stop, target) {
+  try {
+    const payload = {
+      symbol : ticker || '',
+      entry  : entry  || '',
+      stop   : stop   || '',
+      target : target || '',
+    };
+    const r = await api('evaluate_setup', payload);
+    renderRules(r);
+  } catch (e) {
+    document.getElementById('rules-card').style.display = 'block';
+    document.getElementById('rules-verdict').className = 'rules-verdict no';
+    document.getElementById('rules-verdict').innerHTML = `Ошибка проверки правил: ${e.message}`;
+    document.getElementById('rules-list').innerHTML = '';
+  }
+}
+
+function renderRules(r) {
+  const card = document.getElementById('rules-card');
+  card.style.display = 'block';
+
+  // Verdict
+  const v = r.verdict || {};
+  const cnt = r.counts || {};
+  const verdictEl = document.getElementById('rules-verdict');
+  const cls = (v.code || '').toLowerCase();
+  verdictEl.className = 'rules-verdict ' + cls;
+  verdictEl.innerHTML = `
+    <span>${v.code === 'OK' ? '✓' : v.code === 'NO' ? '✗' : v.code === 'CAUTION' ? '⚠' : '?'} ${v.label || ''}</span>
+    <span class="rules-verdict-counts">${cnt.ok || 0} OK · ${cnt.warn || 0} warn · ${cnt.fail || 0} fail · ${cnt.manual || 0} ручных</span>
+  `;
+
+  // Rules list
+  const icon = s => s === 'ok' ? '✓' : s === 'fail' ? '✗' : s === 'warn' ? '⚠' : '?';
+  const ul = document.getElementById('rules-list');
+  ul.innerHTML = (r.rules || []).map(rule => `
+    <li>
+      <span class="rule-icon ${rule.status}">${rule.n}. ${icon(rule.status)}</span>
+      <div>
+        <div class="rule-title">${rule.title}</div>
+        <div class="rule-reason">${rule.reason}</div>
+      </div>
+    </li>
+  `).join('');
 }
 
 async function saveCalc() {
   if (!lastCalc) return;
   const btn = document.getElementById('save-btn');
-  btn.textContent = 'Сохраняю...';
-  btn.disabled = true;
-  setStatus('Сохраняю...', 'var(--amber)');
+  btn.textContent = 'Сохраняю…'; btn.disabled = true;
+  setStatus('Сохраняю…', 'var(--amber)');
   try {
-    const res = await apiCall({ action: 'save', sheet: 'calc', record: JSON.stringify(lastCalc) });
-    if (!res.ok) throw new Error();
+    await api('save_calc', lastCalc);
     setStatus('Сохранено ✓', 'var(--green)');
     await loadCalcs();
     resetCalc();
-  } catch(e) {
-    setStatus('Ошибка', 'var(--red)');
-    alert('Не удалось сохранить.');
+  } catch (e) {
+    setStatus('Ошибка: ' + e.message, 'var(--red)');
+    alert('Не удалось сохранить: ' + e.message);
   } finally {
-    btn.textContent = 'Сохранить';
-    btn.disabled = false;
+    btn.textContent = 'Сохранить'; btn.disabled = false;
   }
 }
 
 async function deleteCalc(id) {
   if (!confirm('Удалить расчёт?')) return;
   try {
-    await apiCall({ action: 'delete', sheet: 'calc', id: String(id) });
+    await api('delete_calc', { id });
     setStatus('Удалено ✓', 'var(--green)');
     await loadCalcs();
-  } catch(e) {
-    setStatus('Ошибка', 'var(--red)');
+  } catch (e) {
+    setStatus('Ошибка: ' + e.message, 'var(--red)');
   }
 }
 
 async function loadCalcs() {
-  setStatus('Загружаю...', 'var(--amber)');
+  setStatus('Загружаю…', 'var(--amber)');
   try {
-    const data = await apiCall({ action: 'read', sheet: 'calc' });
-    if (!data.ok) throw new Error();
-    calcs = (data.rows || []).reverse();
+    const data = await api('list_calcs');
+    calcs = data.calcs || [];
     setStatus(calcs.length ? `${calcs.length} расчётов` : 'Нет записей', 'var(--muted)');
     renderCalcs();
-  } catch(e) {
-    setStatus('Ошибка загрузки', 'var(--red)');
+  } catch (e) {
+    setStatus('Ошибка загрузки: ' + e.message, 'var(--red)');
   }
 }
 
@@ -247,20 +358,20 @@ function renderCalcs() {
     <div class="calc-entry">
       <div class="calc-entry-header">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-          <span class="calc-ticker">${c['Тикер'] || '—'}</span>
-          <span style="font-size:12px;color:var(--muted);">${c['Дата'] || ''}</span>
-          <span style="font-size:12px;color:var(--muted);">@$${c['Вход']} · ${c['Лот']} акций</span>
+          <span class="calc-ticker">${c.symbol || '—'}</span>
+          <span style="font-size:12px;color:var(--muted);">${c.note_date || ''}</span>
+          <span style="font-size:12px;color:var(--muted);">@$${Number(c.entry).toFixed(2)} · ${c.lot} акций</span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
-          <span style="font-family:'DM Mono',monospace;font-size:13px;color:var(--green);">+$${c['Профит 2R']}</span>
-          <button class="btn sm danger" onclick="deleteCalc('${c['ID']}')">✕</button>
+          <span style="font-family:'DM Mono',monospace;font-size:13px;color:var(--green);">+$${Math.round(c.profit_2r).toLocaleString('en-US')}</span>
+          <button class="btn sm danger" onclick="deleteCalc(${c.id})">✕</button>
         </div>
       </div>
       <div class="calc-nums">
-        Стоп: <span class="r">$${c['Стоп цена']}</span> &nbsp;·&nbsp;
-        Риск: $${c['Риск $']} &nbsp;·&nbsp;
-        ТП 2R: <span class="g">$${c['ТП 2R']}</span> (+$${c['Профит 2R']}) &nbsp;·&nbsp;
-        ТП 3R: <span class="g">$${c['ТП 3R']}</span> (+$${c['Профит 3R']})
+        Стоп: <span class="r">$${Number(c.stop_price).toFixed(2)}</span> &nbsp;·&nbsp;
+        Риск: $${Math.round(c.risk_usd)} &nbsp;·&nbsp;
+        ТП 2R: <span class="g">$${Number(c.rr2_target).toFixed(2)}</span> (+$${Math.round(c.profit_2r)}) &nbsp;·&nbsp;
+        ТП 3R: <span class="g">$${Number(c.rr3_target).toFixed(2)}</span> (+$${Math.round(c.profit_3r)})
       </div>
     </div>
   `).join('');
@@ -270,6 +381,7 @@ function resetCalc() {
   ['c-ticker','c-entry','c-stop','c-target'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('calc-result').style.display = 'none';
   document.getElementById('save-btn').style.display = 'none';
+  document.getElementById('rules-card').style.display = 'none';
   lastCalc = null;
   document.getElementById('c-entry').focus();
 }
